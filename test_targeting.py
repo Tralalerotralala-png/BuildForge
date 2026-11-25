@@ -1,4 +1,4 @@
-import contextlib,io,json,os,shutil,tempfile,unittest
+import contextlib,io,json,os,shutil,tempfile,unittest,time
 from pathlib import Path
 from unittest.mock import patch
 import engine,link_stage
@@ -75,5 +75,50 @@ class TargetTests(unittest.TestCase):
             # Removing the override returns only that file to its base fingerprint.
             c['overrides']={};c['link']=False;self.assertEqual(run(),0);self.assertEqual(json.loads((out/'safe_status.json').read_text())['cached'],8)
             self.assertEqual(json.loads((out/'stubborn.json').read_text())['key']['context_sha256'],oldstamp['key']['context_sha256'])
+
+    @unittest.skipUnless(os.name!='nt' and shutil.which('clang++'),'Local Linux Clang required')
+    def test_opt_in_slow_target_retry_preserves_other_cache(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); src=root/'src'; src.mkdir(); out=root/'out'
+            ndk=root/'ndk'; tool=ndk/'toolchains/llvm/prebuilt/linux-x86_64'
+            (tool/'bin').mkdir(parents=True); (tool/'sysroot/usr/include').mkdir(parents=True)
+            (tool/'bin/clang++').symlink_to(shutil.which('clang++'))
+            (src/'normal.cpp').write_text('int normal(){return 1;}')
+            (src/'hard.cpp').write_text('int hard(){return 2;}')
+            c=dict(source=str(src),output=str(out),ndk=str(ndk),includes=[],workers=2,api=21,
+                   opt='1',reserve=2,headroom=.5,stopfile=str(root/'stop'),arch='aarch64',
+                   slow_seconds=1,overrides={'hard.cpp':{'opt':'1','timing':False}})
+            with patch('engine.available_ram',return_value=64*GIB),contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(engine.run(c,str(out)),0)
+                old=(digest(out/'normal.o'),(out/'normal.o').stat().st_mtime_ns)
+                (src/'hard.cpp').write_text('int hard(){return 3;}')
+                real=engine.compile_one
+                attempts=[]
+                def injected_failure(src, out, compiler, flags, context, reuse, registry):
+                    if src.name=='hard.cpp':
+                        attempts.append(list(flags))
+                        if '-O1' in flags:
+                            time.sleep(1.1)
+                            (out/'hard.log').write_text('synthetic first attempt failure')
+                            return src.name,'failed'
+                    return real(src,out,compiler,flags,context,reuse,registry)
+                with patch('engine.compile_one',side_effect=injected_failure):
+                    self.assertEqual(engine.run(c,str(out)),1)
+                    self.assertEqual(len(attempts),1)
+                    c['retry_slow_targets']=True
+                    self.assertEqual(engine.run(c,str(out)),0)
+                self.assertEqual(len(attempts),3)
+                self.assertIn('-O0',attempts[-1])
+                self.assertIn('-ftime-report',attempts[-1])
+                self.assertEqual((digest(out/'normal.o'),(out/'normal.o').stat().st_mtime_ns),old)
+                status=json.loads((out/'safe_status.json').read_text())
+                self.assertEqual(status['retry_overrides'],{'hard.cpp':{'opt':'0','timing':True}})
+                manifest=json.loads((out/'object_manifest.json').read_text())
+                self.assertEqual(manifest['overrides']['hard.cpp'],{'opt':'0','timing':True})
+                timings=json.loads((out/'unit_timings.json').read_text())
+                self.assertEqual(timings['units']['hard.cpp']['first_attempt']['state'],'failed')
+                c['overrides'].update(status['retry_overrides'])
+                self.assertEqual(engine.run(c,str(out)),0)
+                self.assertEqual(json.loads((out/'safe_status.json').read_text())['cached'],2)
 
 if __name__=='__main__':unittest.main()
