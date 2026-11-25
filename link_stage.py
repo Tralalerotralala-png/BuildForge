@@ -5,6 +5,7 @@ import re
 import subprocess
 import tempfile
 import time
+import sys
 from pathlib import Path
 
 from cache_compat import _replace_with_retry, atomic_json, digest, is_elf_object
@@ -51,6 +52,63 @@ def linker_options(c, creationflags=0):
     if not re.search(r'\bLLD\b', version, re.IGNORECASE):
         raise ValueError('Selected linker did not identify itself as LLVM LLD.')
     return ['-fuse-ld=' + str(p)], version[:500]
+
+
+def probe_toolchain(c):
+    """Test driver/linker compatibility using only disposable synthetic C code."""
+    arch = c.get('arch', 'aarch64')
+    api = int(c.get('api', 21))
+    if arch not in ('aarch64', 'x86_64') or not 21 <= api <= 35:
+        raise ValueError('Unsupported architecture or Android API.')
+    raw = c.get('ndk', '')
+    if not raw:
+        raise ValueError('Select an NDK first.')
+    host = ('windows-x86_64' if os.name == 'nt' else
+            'linux-x86_64' if sys.platform.startswith('linux') else 'darwin-x86_64')
+    tool = Path(raw).resolve() / 'toolchains' / 'llvm' / 'prebuilt' / host
+    compiler = tool / 'bin' / ('clang++.exe' if os.name == 'nt' else 'clang++')
+    sysroot = tool / 'sysroot'
+    if not compiler.is_file() or not sysroot.is_dir():
+        raise ValueError('NDK compiler/sysroot not found.')
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+    linker_flags, version = linker_options(c, creationflags)
+    common = [str(compiler), f'--target={arch}-linux-android{api}', f'--sysroot={sysroot}']
+    start = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix='buildforge-link-probe-') as d:
+        root = Path(d)
+        source, obj, shared = root / 'probe.c', root / 'probe.o', root / 'libprobe.so'
+        source.write_text('int buildforge_probe(void) { return 42; }\n', encoding='utf-8')
+        machine = 62 if arch == 'x86_64' else 183
+        for stage, args in [
+            ('compile', common + ['-x', 'c', '-fPIC', '-c', str(source), '-o', str(obj)]),
+            ('link', common + linker_flags + ['-shared', '-nostdlib', '-Wl,--no-undefined',
+                                              str(obj), '-o', str(shared)]),
+        ]:
+            try:
+                result = subprocess.run(args, capture_output=True, timeout=30, creationflags=creationflags)
+            except subprocess.TimeoutExpired as e:
+                raise ValueError(f'Synthetic {stage} probe timed out after 30 seconds.') from e
+            if result.returncode:
+                diagnostic = (result.stdout + result.stderr).decode(errors='replace')[-2000:]
+                raise ValueError(f'Synthetic {stage} probe failed (exit {result.returncode}): {diagnostic}')
+            if stage == 'compile' and not is_elf_object(obj, machine):
+                raise ValueError('Synthetic compile produced an invalid target object.')
+        if not is_shared_elf(shared, machine):
+            raise ValueError('Synthetic linker output is not the expected Android ELF shared library.')
+    return {'success': True, 'arch': arch, 'api': api, 'linker_version': version,
+            'elapsed_seconds': round(time.monotonic() - start, 3),
+            'scope': 'synthetic freestanding compile/link only'}
+
+
+def is_shared_elf(path, machine):
+    try:
+        with path.open('rb') as f:
+            b = f.read(64)
+        return (len(b) == 64 and b[:6] == b'\x7fELF\x02\x01'
+                and int.from_bytes(b[16:18], 'little') == 3
+                and int.from_bytes(b[18:20], 'little') == machine)
+    except OSError:
+        return False
 
 
 def link(c, out, compiler, flags, entries, registry=None, notify=None):
@@ -127,14 +185,7 @@ def link(c, out, compiler, flags, entries, registry=None, notify=None):
                 finally:
                     if registry:
                         registry.remove(p)
-        with tmp.open('rb') as f:
-            b = f.read(64)
-        valid = (
-            len(b) == 64
-            and b[:6] == b'\x7fELF\x02\x01'
-            and int.from_bytes(b[16:18], 'little') == 3
-            and int.from_bytes(b[18:20], 'little') == machine
-        )
+        valid = is_shared_elf(tmp, machine)
         ok = code == 0 and valid and not cancelled
         if ok:
             _replace_with_retry(tmp, target)

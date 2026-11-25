@@ -61,3 +61,7 @@ Select active compiler rows and use **Cancel selected compiler units…** to req
 ### Optional external LLVM linker (development)
 
 The Link tab accepts an explicit absolute path to an existing `ld.lld` / `ld.lld.exe`. Leave it blank for the NDK driver's default. The driver receives `-fuse-ld=<absolute path>` and the selected executable must identify itself as LLD. No automatic downloads or silent fallback. Older NDK drivers and newer LLD releases may be incompatible; test on a separate synthetic project first. The link stage reports elapsed time, the selected linker's version and cancellation status; it never invents a completion percentage. A cancelled link preserves a previous library. Cancellation is best-effort and still depends on process-tree termination support. Compiler cache keys are unchanged by linker selection.
+
+### Toolchain compatibility probe (0.7 development)
+
+Use **Test compiler / linker compatibility** in the Link tab after selecting the NDK, architecture, API and optional external LLD. The check compiles and strictly links a tiny freestanding C source in a temporary directory, verifies the target object and shared ELF type, then removes the temporary files. It does not read project sources or write project output, switch linkers, or download tools. The compile and link steps have independent 30-second timeouts. Passing this probe is not proof of large-project compatibility, SDK library availability, or device execution.
