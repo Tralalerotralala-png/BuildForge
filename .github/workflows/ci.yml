@@ -33,12 +33,16 @@ jobs:
       - name: Build Windows portable app
         if: runner.os == 'Windows' && matrix.python == '3.11'
         run: |
-          python -m pip install pyinstaller psutil
+          python -m pip install -r requirements-build.txt
           python -m PyInstaller --noconfirm --clean --onedir --console --name BuildForge --hidden-import engine --hidden-import resource_control app.py
           & .\dist\BuildForge\BuildForge.exe --engine --help
           if ($LASTEXITCODE -ne 0) { throw 'Frozen engine failed' }
           & .\dist\BuildForge\BuildForge.exe --gui-smoke-test
           if ($LASTEXITCODE -ne 0) { throw 'Frozen GUI failed' }
+          Copy-Item LICENSE dist/BuildForge/LICENSE.txt
+          Copy-Item README.md dist/BuildForge/README.md
+          Copy-Item RELEASE_CHECKLIST.md dist/BuildForge/RELEASE_CHECKLIST.md
+          python tools/package_candidate.py prepare dist/BuildForge
       - name: Native Android NDK compile, link and cache smoke
         if: runner.os == 'Windows' && matrix.python == '3.11'
         run: python tests/windows_ndk_smoke.py dist/BuildForge/BuildForge.exe
@@ -72,6 +76,15 @@ jobs:
             if (Test-Path (Join-Path $target 'BuildForge.exe')) { throw 'Application remained after uninstall' }
           }
           Get-FileHash -Algorithm SHA256 $setup.FullName | Format-List | Out-File installer\SHA256.txt -Encoding utf8
+      - name: Package release-candidate evidence
+        if: runner.os == 'Windows' && matrix.python == '3.11'
+        run: python tools/package_candidate.py bundle dist/BuildForge installer release-candidate
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows' && matrix.python == '3.11'
+        with:
+          name: BuildForge-Windows-release-candidate
+          path: release-candidate/
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows' && matrix.python == '3.11'
         with:

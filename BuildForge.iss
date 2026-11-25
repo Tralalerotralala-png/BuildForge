@@ -1,4 +1,4 @@
-; Optional Inno Setup 6 recipe. Build dist\BuildForge first. Not Windows-tested.
+; Inno Setup 6 recipe. Hosted CI smoke-tested; independent clean-machine validation remains required.
 [Setup]
 AppId=BuildForge.Local.Workbench.Beta
 AppName=BuildForge

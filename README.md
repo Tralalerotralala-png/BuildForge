@@ -1,6 +1,6 @@
 # BuildForge 0.7.0-rc.1 — local C++ build & targeted retry workbench
 
-Local, resumable C/C++ object compilation and optional strict Android ELF shared-library linking. 0.7 integration candidate, not a certified production release. Linux/Windows source checks and portable Windows packaging are validated by CI; native Windows NDK, installer and device tests remain release gates (see [ROADMAP.md](ROADMAP.md)).
+Local, resumable C/C++ object compilation and optional strict Android ELF shared-library linking. 0.7 integration candidate, not a certified production release. Linux/Windows source checks, portable Windows packaging, native hosted Windows NDK and installer smoke tests pass CI; independent clean-machine, device and signing validation remain release gates (see [ROADMAP.md](ROADMAP.md)).
 
 ## Start on Windows
 
@@ -75,3 +75,7 @@ Use **Test compiler / linker compatibility** in the Link tab after selecting the
 ### Opt-in slow-target retry (0.7 development)
 
 Enable **Retry explicitly targeted slow failures once at O0** in Target & diagnose to retry an explicitly listed O1/O2 unit after a failed attempt at or beyond the configured slow threshold. This never interrupts an active compiler, retries at most once per target per run, respects stop/cancel requests, and does not change other units' flags. Elapsed time includes scheduling and fingerprint validation; it is not proof of a compiler hang. The new object receives its actual O0/timing fingerprint. `safe_status.json` reports `retry_overrides`, `unit_timings.json` records the first attempt's elapsed time and log tail, and the completed manifest uses the actual effective overrides. Review and save the emitted override lines in your profile to preserve the new cache entries on future runs. A profile is never rewritten automatically. Mixed optimization requires project-specific ABI/runtime validation. No automatic fallback for untargeted files.
+
+### Candidate distribution evidence
+
+CI builds candidate artifacts using `requirements-build.txt` (pinned versions observed in the validated Windows run). The candidate artifact contains a portable ZIP, installer, SHA-256 checksums and build metadata. The ZIP writer normalizes archive ordering and timestamps; this does not guarantee bit-identical PyInstaller/Inno binaries across runner images. Candidate binaries are unsigned unless separately verified by the maintainer. See [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) before distributing a stable release.
