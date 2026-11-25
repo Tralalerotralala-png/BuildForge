@@ -31,6 +31,28 @@ class TargetTests(unittest.TestCase):
             with patch('link_stage.subprocess.check_output', return_value=b'not a linker'):
                 with self.assertRaises(ValueError):
                     link_stage.linker_options({'linker_path': str(p)})
+    def test_probe_rejects_invalid_target_and_missing_ndk(self):
+        for c in [{'arch':'armv7'}, {'api':19}, {'ndk':''}]:
+            with self.assertRaises(ValueError):
+                link_stage.probe_toolchain(c)
+
+    @unittest.skipUnless(os.name!='nt' and shutil.which('clang++') and shutil.which('ld.lld'),'Local Linux Clang/LLD required')
+    def test_synthetic_linker_probe_both_architectures(self):
+        with tempfile.TemporaryDirectory(prefix='forge probe space ') as d:
+            root=Path(d); ndk=root/'ndk'; tool=ndk/'toolchains/llvm/prebuilt/linux-x86_64'
+            (tool/'bin').mkdir(parents=True); (tool/'sysroot/usr/include').mkdir(parents=True)
+            (tool/'bin/clang++').symlink_to(shutil.which('clang++'))
+            private=root/'untouched'; private.mkdir()
+            sentinel=private/'sentinel'; sentinel.write_text('unchanged')
+            before=sorted(str(p.relative_to(root)) for p in root.rglob('*'))
+            for arch in ('aarch64','x86_64'):
+                r=link_stage.probe_toolchain(dict(ndk=str(ndk),arch=arch,api=21,linker_path=shutil.which('ld.lld')))
+                self.assertTrue(r['success'])
+                self.assertEqual(r['arch'],arch)
+                self.assertIn('LLD',r['linker_version'])
+            self.assertEqual(sentinel.read_text(),'unchanged')
+            self.assertEqual(sorted(str(p.relative_to(root)) for p in root.rglob('*')),before)
+
     @unittest.skipUnless(os.name!='nt' and shutil.which('clang++') and shutil.which('ld.lld'),'Local Linux Clang/LLD required')
     def test_actual_mixed_cache_and_strict_link(self):
         with tempfile.TemporaryDirectory(prefix='forge space ') as d:
