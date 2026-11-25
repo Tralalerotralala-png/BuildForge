@@ -1,5 +1,12 @@
 # BuildForge release gates
 
+## 0.6 integration candidate — combined CI required
+- Bounded dashboard event handling and remaining-unit count.
+- Optional external LLD and link heartbeat.
+- Session and selected-unit cancellation admission guards.
+- Read-only full cache audit on a background UI worker.
+- Do not distribute as a release until combined Windows/Linux CI and packaging checks pass.
+
 ## Implemented in 0.5 development beta
 - Owned-process-tree cancellation (`cancelfile` + `ProcessRegistry.terminate_all()`) with safe lock release and preserved cache hits.
 - Slow-then-failed unit retention in `diagnostics.py` across both named `0.4+` logs and legacy exhausted-tail logs.

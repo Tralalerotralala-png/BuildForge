@@ -139,16 +139,64 @@ def plan(c):
     return sources, out, ndk, compiler, roots, flags, workers, reserve, headroom
 
 
+def compilation_context(ndk, compiler, roots):
+    """Use the identical legacy context for compilation and read-only audits."""
+    roots = list(roots)
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+    version = subprocess.check_output(
+        [str(compiler), '--version'], stderr=subprocess.STDOUT, timeout=30, creationflags=creationflags
+    )
+    resource = (
+        Path(
+            subprocess.check_output(
+                [str(compiler), '-print-resource-dir'], text=True, timeout=30, creationflags=creationflags
+            ).strip()
+        )
+        / 'include'
+    )
+    roots += [resource, ndk / 'sources' / 'cxx-stl' / 'llvm-libc++' / 'include']
+    base = {
+        'compiler_sha256': digest(compiler),
+        'version': version.decode(errors='replace'),
+        'headers': header_digest(roots),
+    }
+    return base, roots
+
+
 def find_missing_units(c) -> list[str]:
-    """Return sorted source filenames lacking a valid object and stamp in output."""
-    sources, out, _, _, _, flags, *_ = plan(c)
+    """Read-only audit of source/object/context fingerprints for the selected profile.
+
+    Results are advisory: a subsequent build must revalidate under its own lock.
+    """
+    sources, out, ndk, compiler, roots, flags, *_ = plan(c)
+    lock = out / '.compile.lock'
+    if lock.exists():
+        raise ValueError('Output is locked. Finish the active build before auditing.')
+    base, _ = compilation_context(ndk, compiler, roots)
+    overrides = overrides_for(sources, c.get('overrides', {}))
     machine = 62 if any(f.startswith('--target=x86_64-') for f in flags) else 183
     missing = []
     for s in sources:
         obj = out / (s.stem + '.o')
         stamp = out / (s.stem + '.json')
-        if not obj.is_file() or not stamp.is_file() or not is_elf_object(obj, machine):
+        context = fingerprint(base, flags_for(flags, overrides.get(s.name)))
+        if s.suffix.lower() == '.c':
+            context = hashlib.sha256((context + '|C17').encode()).hexdigest()
+        try:
+            data = json.loads(stamp.read_text(encoding='utf-8'))
+            key = {'source_sha256': digest(s), 'context_sha256': context}
+            valid = (
+                isinstance(data, dict)
+                and data.get('key') == key
+                and is_elf_object(obj, machine)
+                and data.get('object_sha256') == digest(obj)
+            )
+        except (OSError, ValueError):
+            valid = False
+        if not valid:
             missing.append(s.name)
+    if lock.exists():
+        raise ValueError('A build started during the audit. Discarding results.')
     return sorted(missing)
 
 
@@ -161,6 +209,7 @@ def run(c, output_arg):
     token = uuid.uuid4().hex
     stopfile = Path(c['stopfile'])
     cancelfile = Path(c['cancelfile']) if c.get('cancelfile') else None
+    unit_cancel_file = Path(c['unit_cancel_file']) if c.get('unit_cancel_file') else None
     fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     lock_data = json.dumps({'engine': 'BuildForge', 'pid': os.getpid(), 'token': token, 'time': time.time()}).encode()
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
@@ -172,23 +221,7 @@ def run(c, output_arg):
         for name in ('objects.rsp', 'safe_status.json', 'object_manifest.json', 'link_status.json'):
             (out / name).unlink(missing_ok=True)
         event('phase', message='Checking toolchain and hashing headers; existing cache format preserved.', total=len(sources))
-        version = subprocess.check_output(
-            [str(compiler), '--version'], stderr=subprocess.STDOUT, timeout=30, creationflags=creationflags
-        )
-        resource = (
-            Path(
-                subprocess.check_output(
-                    [str(compiler), '-print-resource-dir'], text=True, timeout=30, creationflags=creationflags
-                ).strip()
-            )
-            / 'include'
-        )
-        roots += [resource, ndk / 'sources' / 'cxx-stl' / 'llvm-libc++' / 'include']
-        base = {
-            'compiler_sha256': digest(compiler),
-            'version': version.decode(errors='replace'),
-            'headers': header_digest(roots),
-        }
+        base, roots = compilation_context(ndk, compiler, roots)
         overrides = overrides_for(sources, c.get('overrides', {}))
         unit_flags = {s.name: flags_for(flags, overrides.get(s.name)) for s in sources}
         contexts = {name: fingerprint(base, f) for name, f in unit_flags.items()}
@@ -207,12 +240,37 @@ def run(c, output_arg):
         submitted = {}
         control = LiveControl(c.get('controlfile'), int(c.get('budget', 100)))
         registry = ProcessRegistry()
+        requested_units = set()
+        source_names = {s.name for s in sources}
+
+        def check_unit_cancellations():
+            if unit_cancel_file is None or cancelled:
+                return
+            try:
+                data = json.loads(unit_cancel_file.read_text(encoding='utf-8'))
+                names = data.get('units') if isinstance(data, dict) else None
+                if not isinstance(names, list) or any(not isinstance(n, str) for n in names):
+                    return
+            except (OSError, ValueError):
+                return
+            # The GUI sends exact names from this session. Ignore unknown or
+            # already-completed units. No PID is accepted from the control file.
+            new = (set(names) & source_names) - requested_units - results.keys()
+            if not new:
+                return
+            requested_units.update(new)
+            attempted = registry.cancel_labels(new)
+            event('warning', message='Selected cancellation requested for '
+                  + ', '.join(sorted(new))
+                  + f'; {attempted} owned process(es) targeted. Other units continue.')
+
         total_ram = hardware()['total_ram']
         priority = 'scheduler only'
         last_priority = 0
         event('phase', message='Compiling or validating cached objects.', total=len(sources))
         with cf.ThreadPoolExecutor(max_workers=workers) as pool:
             while q or running:
+                check_unit_cancellations()
                 stopped = stopped or stopfile.exists()
                 if cancelfile and cancelfile.exists() and not cancelled:
                     cancelled = True
@@ -237,6 +295,12 @@ def run(c, output_arg):
                     and can_launch(free, len(running), effective_reserve, headroom)
                 ):
                     s = q.popleft()
+                    if s.name in requested_units:
+                        results[s.name] = 'failed'
+                        timings[s.name] = {'state': 'failed', 'seconds': 0, 'cancel_requested': True}
+                        event('unit', name=s.name, state='failed', seconds=0,
+                              log_tail='Selected cancellation requested before launch.')
+                        continue
                     future = pool.submit(
                         compile_one, s, out, compiler, unit_flags[s.name], contexts[s.name], True, registry
                     )
@@ -262,7 +326,7 @@ def run(c, output_arg):
                         name, state = f.result()
                         results[name] = state
                         elapsed = round(time.monotonic() - submitted.pop(f), 3)
-                        timings[name] = {'state': state, 'seconds': elapsed}
+                        timings[name] = {'state': state, 'seconds': elapsed, 'cancel_requested': name in requested_units}
                         extra = {}
                         if state == 'failed':
                             tail = _read_log_tail(out / (Path(name).stem + '.log'))
@@ -350,7 +414,7 @@ def run(c, output_arg):
             if c.get('link'):
                 event('phase', message='Strict shared-library link; unresolved symbols fail the link.')
                 try:
-                    link_ok = link_stage.link(c, out, compiler, flags, entries, registry)
+                    link_ok = link_stage.link(c, out, compiler, flags, entries, registry, notify=lambda message: event('phase', message=message))
                 except Exception as e:
                     event('warning', message='Link failed: ' + str(e))
                     atomic_json(out / 'link_status.json', {'success': False, 'error': str(e)})
@@ -366,6 +430,7 @@ def run(c, output_arg):
             'device_execution_verified': False,
             'stopped': (stopped or cancelled) and not complete,
             'cancelled': cancelled and not complete,
+            'selected_cancel_requests': sorted(requested_units),
             'mixed_flags': any(unit_flags[n] != flags for n in unit_flags),
             'link_requested': bool(c.get('link')),
         }
