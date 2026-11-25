@@ -67,6 +67,7 @@ def defaults():
         slow_seconds=900,
         link=False,
         link_name='liboutput.so',
+        linker_path='',
         link_system_libs=[],
         link_libraries=[],
         freestanding=False,
@@ -98,6 +99,8 @@ class App:
         self.proc = None
         self.stopfile = None
         self.cancelfile = None
+        self.unit_cancel_file = None
+        self.unit_cancel_requests = set()
         self.busy = False
         self.closing = False
         self.matches = []
@@ -316,6 +319,7 @@ class App:
         ttk.Button(rt, text='Copy selected active filenames for next retry', command=self.copy_active).pack(
             anchor='w', pady=(0, 4)
         )
+        ttk.Button(rt, text='Cancel selected compiler units…', command=self.cancel_selected).pack(anchor='w', pady=(0, 4))
         logs = ttk.Frame(rt)
         logs.pack(fill='both', expand=True)
         self.logs = tk.Text(
@@ -395,7 +399,7 @@ class App:
         b = ttk.Button(row, text='Analyze session log…', command=self.analyze_log)
         b.pack(side='left', padx=6)
         self.inputs.append(b)
-        b_miss = ttk.Button(row, text='Find missing / failed units', command=self.find_missing)
+        b_miss = ttk.Button(row, text='Audit cache fingerprints', command=self.find_missing)
         b_miss.pack(side='left', padx=6)
         self.inputs.append(b_miss)
         ttk.Label(
@@ -415,6 +419,11 @@ class App:
         self.v['link_name'] = tk.StringVar(value='liboutput.so')
         ttk.Label(lk, text='Output library filename').pack(anchor='w')
         e = ttk.Entry(lk, textvariable=self.v['link_name'])
+        e.pack(fill='x')
+        self.inputs.append(e)
+        self.v['linker_path'] = tk.StringVar(value='')
+        ttk.Label(lk, text='Optional external ld.lld executable (absolute path; blank = NDK default)').pack(anchor='w', pady=(8, 0))
+        e = ttk.Entry(lk, textvariable=self.v['linker_path'])
         e.pack(fill='x')
         self.inputs.append(e)
         ttk.Label(lk, text='Additional archive/shared library paths (one per line)').pack(anchor='w', pady=(10, 0))
@@ -468,6 +477,7 @@ class App:
             slow_seconds=self.v['slow_seconds'].get(),
             link=self.v['link'].get(),
             link_name=self.v['link_name'].get(),
+            linker_path=self.v['linker_path'].get().strip(),
             freestanding=self.v['freestanding'].get(),
             link_libraries=[x.strip() for x in self.link_libs.get('1.0', 'end').splitlines() if x.strip()],
             link_system_libs=[x.strip() for x in self.link_system.get('1.0', 'end').splitlines() if x.strip()],
@@ -712,6 +722,9 @@ class App:
         self.cancelfile = jobs / (ident + '.cancel')
         c['stopfile'] = str(self.stopfile)
         c['cancelfile'] = str(self.cancelfile)
+        self.unit_cancel_file = jobs / (ident + '.unit-cancel.json')
+        self.unit_cancel_requests = set()
+        c['unit_cancel_file'] = str(self.unit_cancel_file)
         self.controlfile = jobs / (ident + '.budget.json')
         c['controlfile'] = str(self.controlfile)
         c['budget'] = self.budget.get()
@@ -802,28 +815,37 @@ class App:
         if self.proc or self.busy:
             return
         try:
-            from engine import find_missing_units
-
             c = self.get()
-            missing = find_missing_units(c)
         except Exception as e:
             messagebox.showerror('Check failed', str(e))
             return
+        self.set_busy(True)
+        self.status.set('Auditing cache fingerprints; source and output remain unchanged…')
+
+        def task():
+            try:
+                from engine import find_missing_units
+                self.q.put(('cache_audit', find_missing_units(c)))
+            except Exception as e:
+                self.q.put(('cache_audit_error', str(e)))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def show_cache_audit(self, missing):
+        self.set_busy(False)
+        self.status.set(f'Cache audit complete: {len(missing)} unit(s) need validation or rebuilding.')
         if not missing:
-            messagebox.showinfo('Complete', 'All expected source units already have valid objects and stamps.')
+            messagebox.showinfo('Cache audit', 'All expected units match current source, object and compilation-context fingerprints.')
             return
         preview = '\n'.join(missing[:20]) + (f'\n… and {len(missing) - 20} more' if len(missing) > 20 else '')
-        opt = 'same' if str(c.get('opt', '1')) == '0' else '0'
         if messagebox.askyesno(
-            'Missing / failed units found',
-            f'Found {len(missing)} unit(s) without valid objects:\n\n{preview}\n\n'
-            f'Add them to overrides with optimization={opt} and timing enabled?',
+            'Cache audit',
+            f'{len(missing)} unit(s) have missing, damaged, or stale cache entries:\n\n{preview}\n\n'
+            'This does not prove a slow compiler. A normal resume revalidates and recompiles invalid entries '
+            'using the current profile. Copy the full list of names to the clipboard for review?',
         ):
-            current = parse_overrides(self.overrides.get('1.0', 'end'))
-            for name in missing:
-                current[name] = {'opt': None if opt == 'same' else opt, 'timing': True}
-            self.overrides.delete('1.0', 'end')
-            self.overrides.insert('1.0', format_overrides(current))
+            self.root.clipboard_clear()
+            self.root.clipboard_append('\n'.join(missing))
 
     def copy_active(self):
         selected = self.live_units.selection()
@@ -834,6 +856,30 @@ class App:
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
         self.status.set('Target lines copied. Paste in Target & diagnose after this build stops.')
+
+    def cancel_selected(self):
+        if not (self.proc and self.unit_cancel_file):
+            return
+        names = {str(self.live_units.item(i, 'values')[0]) for i in self.live_units.selection()}
+        if not names:
+            messagebox.showinfo('Cancel selected units', 'Select one or more active compiler rows.')
+            return
+        names -= self.unit_cancel_requests
+        if not names:
+            return
+        if not messagebox.askyesno('Cancel selected units',
+                                  'Request cancellation of only these source units?\n\n'
+                                  + '\n'.join(sorted(names)) +
+                                  '\n\nOther workers continue. Cancelled units may require a later retry.',
+                                  icon='warning'):
+            return
+        try:
+            requested = self.unit_cancel_requests | names
+            atomic_json(self.unit_cancel_file, {'units': sorted(requested)})
+            self.unit_cancel_requests = requested
+            self.append('Selected cancellation requested: ' + ', '.join(sorted(names)), tag='WARNING')
+        except OSError as e:
+            messagebox.showerror('Cancellation request failed', str(e))
 
     def graceful(self):
         if self.proc and self.stopfile:
@@ -896,10 +942,17 @@ class App:
         self.root.after(1500, self.monitor)
 
     def tick(self):
+        # Yield to Tk even when the engine produces events faster than we render.
         try:
-            while True:
+            for _ in range(100):
                 kind, v = self.q.get_nowait()
-                if kind == 'scan':
+                if kind == 'cache_audit':
+                    self.show_cache_audit(v)
+                elif kind == 'cache_audit_error':
+                    self.set_busy(False)
+                    self.status.set('Cache audit failed; nothing changed.')
+                    messagebox.showerror('Cache audit failed', v)
+                elif kind == 'scan':
                     self.set_busy(False)
                     self.scan_output, self.matches, self.unknown = v
                     self.tabs.select(self.recovery_tab)
@@ -940,7 +993,7 @@ class App:
                     elif ev == 'progress':
                         self.progress.set(100 * v['done'] / max(1, v['total']))
                         self.summary.set(
-                            f'{v["done"]}/{v["total"]} processed  |  {v["compiled"]} new  |  '
+                            f'{v["done"]}/{v["total"]} processed  |  {max(0, v["total"] - v["done"])} remaining  |  {v["compiled"]} new  |  '
                             f'{v["cached"]} cached  |  {v["failed"]} failed  |  {v["active"]} active'
                         )
                         self.effective.set(
@@ -994,6 +1047,8 @@ class App:
                     self.active_output = None
                     self.controlfile = None
                     self.cancelfile = None
+                    self.unit_cancel_file = None
+                    self.unit_cancel_requests = set()
                     self.live_units.delete(*self.live_units.get_children())
                     self.freeze_inputs(False)
                     self.stop_btn.configure(state='disabled')
@@ -1004,7 +1059,7 @@ class App:
                         return
         except queue.Empty:
             pass
-        self.root.after(150, self.tick)
+        self.root.after(150 if self.q.empty() else 1, self.tick)
 
     def on_close(self):
         if self.busy:
