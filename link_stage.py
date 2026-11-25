@@ -10,6 +10,19 @@ from pathlib import Path
 from cache_compat import _replace_with_retry, atomic_json, digest, is_elf_object
 
 
+def response_text(out, names):
+    """Encode only absolute object paths, rejecting ambiguous response syntax."""
+    paths = []
+    for name in names:
+        if not isinstance(name, str) or Path(name).name != name or Path(name).suffix != '.o':
+            raise ValueError('Invalid object filename in response list.')
+        p = (out / name).as_posix()
+        if not (out / name).is_absolute() or any(ch in p for ch in ('"', chr(92))) or any(ord(ch) < 32 or ord(ch) == 127 for ch in p):
+            raise ValueError('Object path cannot be represented safely in a linker response file.')
+        paths.append('"' + p + '"\n')
+    return ''.join(paths)
+
+
 def validate_config(c):
     if not c.get('link'):
         return
@@ -57,6 +70,9 @@ def link(c, out, compiler, flags, entries, registry=None, notify=None):
     validate_config(c)
     target = out / c.get('link_name', 'liboutput.so')
     machine = 62 if any(f.startswith('--target=x86_64-') for f in flags) else 183
+    expected_rsp = response_text(out, [e['object'] for e in entries])
+    if (out / 'objects.rsp').read_text(encoding='utf-8') != expected_rsp:
+        raise ValueError('Object response file differs from the validated manifest.')
     for e in entries:
         p = out / e['object']
         stamp = json.loads(p.with_suffix('.json').read_text(encoding='utf-8'))
@@ -73,6 +89,8 @@ def link(c, out, compiler, flags, entries, registry=None, notify=None):
     fd, name = tempfile.mkstemp(dir=out, suffix='.tmp.so')
     os.close(fd)
     tmp = Path(name)
+    response = tmp.with_suffix('.rsp')
+    response_created = False
     args = [
         str(compiler),
         *[f for f in flags if f.startswith(('--target=', '--sysroot=', '-stdlib='))],
@@ -84,7 +102,7 @@ def link(c, out, compiler, flags, entries, registry=None, notify=None):
     if c.get('freestanding'):
         args.append('-nostdlib')
     args += [
-        '@' + str(out / 'objects.rsp'),
+        '@' + str(response),
         *[str(Path(s).resolve()) for s in c.get('link_libraries', [])],
         *['-l' + s for s in c.get('link_system_libs', [])],
         '-o',
@@ -96,6 +114,11 @@ def link(c, out, compiler, flags, entries, registry=None, notify=None):
         if cancelled:
             atomic_json(out / 'link_status.json', {'success': False, 'cancelled': True, 'linker_version': linker_version, 'device_execution_verified': False})
             return False
+        # Never give the driver the public response file after validation.
+        # Use an exclusive, session-local copy generated from manifest entries.
+        with response.open('xb') as f:
+            response_created = True
+            f.write(expected_rsp.encode('utf-8'))
         if notify:
             notify('Linker: ' + linker_version)
         with (out / 'link.log').open('wb') as log:
@@ -153,4 +176,8 @@ def link(c, out, compiler, flags, entries, registry=None, notify=None):
         )
         return ok
     finally:
-        tmp.unlink(missing_ok=True)
+        try:
+            if response_created:
+                response.unlink(missing_ok=True)
+        finally:
+            tmp.unlink(missing_ok=True)
