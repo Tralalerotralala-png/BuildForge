@@ -161,6 +161,7 @@ def run(c, output_arg):
     token = uuid.uuid4().hex
     stopfile = Path(c['stopfile'])
     cancelfile = Path(c['cancelfile']) if c.get('cancelfile') else None
+    unit_cancel_file = Path(c['unit_cancel_file']) if c.get('unit_cancel_file') else None
     fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     lock_data = json.dumps({'engine': 'BuildForge', 'pid': os.getpid(), 'token': token, 'time': time.time()}).encode()
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
@@ -207,12 +208,37 @@ def run(c, output_arg):
         submitted = {}
         control = LiveControl(c.get('controlfile'), int(c.get('budget', 100)))
         registry = ProcessRegistry()
+        requested_units = set()
+        source_names = {s.name for s in sources}
+
+        def check_unit_cancellations():
+            if unit_cancel_file is None or cancelled:
+                return
+            try:
+                data = json.loads(unit_cancel_file.read_text(encoding='utf-8'))
+                names = data.get('units') if isinstance(data, dict) else None
+                if not isinstance(names, list) or any(not isinstance(n, str) for n in names):
+                    return
+            except (OSError, ValueError):
+                return
+            # The GUI sends exact names from this session. Ignore unknown or
+            # already-completed units. No PID is accepted from the control file.
+            new = (set(names) & source_names) - requested_units - results.keys()
+            if not new:
+                return
+            requested_units.update(new)
+            attempted = registry.cancel_labels(new)
+            event('warning', message='Selected cancellation requested for '
+                  + ', '.join(sorted(new))
+                  + f'; {attempted} owned process(es) targeted. Other units continue.')
+
         total_ram = hardware()['total_ram']
         priority = 'scheduler only'
         last_priority = 0
         event('phase', message='Compiling or validating cached objects.', total=len(sources))
         with cf.ThreadPoolExecutor(max_workers=workers) as pool:
             while q or running:
+                check_unit_cancellations()
                 stopped = stopped or stopfile.exists()
                 if cancelfile and cancelfile.exists() and not cancelled:
                     cancelled = True
@@ -237,6 +263,12 @@ def run(c, output_arg):
                     and can_launch(free, len(running), effective_reserve, headroom)
                 ):
                     s = q.popleft()
+                    if s.name in requested_units:
+                        results[s.name] = 'failed'
+                        timings[s.name] = {'state': 'failed', 'seconds': 0, 'cancel_requested': True}
+                        event('unit', name=s.name, state='failed', seconds=0,
+                              log_tail='Selected cancellation requested before launch.')
+                        continue
                     future = pool.submit(
                         compile_one, s, out, compiler, unit_flags[s.name], contexts[s.name], True, registry
                     )
@@ -262,7 +294,7 @@ def run(c, output_arg):
                         name, state = f.result()
                         results[name] = state
                         elapsed = round(time.monotonic() - submitted.pop(f), 3)
-                        timings[name] = {'state': state, 'seconds': elapsed}
+                        timings[name] = {'state': state, 'seconds': elapsed, 'cancel_requested': name in requested_units}
                         extra = {}
                         if state == 'failed':
                             tail = _read_log_tail(out / (Path(name).stem + '.log'))
@@ -366,6 +398,7 @@ def run(c, output_arg):
             'device_execution_verified': False,
             'stopped': (stopped or cancelled) and not complete,
             'cancelled': cancelled and not complete,
+            'selected_cancel_requests': sorted(requested_units),
             'mixed_flags': any(unit_flags[n] != flags for n in unit_flags),
             'link_requested': bool(c.get('link')),
         }
