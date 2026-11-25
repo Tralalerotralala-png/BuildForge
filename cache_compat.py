@@ -17,6 +17,7 @@ from pathlib import Path
 
 EXPECTED_UNITS = 513
 GIB = 1024 ** 3
+_IS_WINDOWS = os.name == 'nt'
 
 
 def _replace_with_retry(src: Path, dst: Path, retries: int = 6, delay: float = 0.05) -> None:
@@ -26,7 +27,7 @@ def _replace_with_retry(src: Path, dst: Path, retries: int = 6, delay: float = 0
             os.replace(src, dst)
             return
         except PermissionError:
-            if attempt == retries - 1 or os.name != 'nt':
+            if attempt == retries - 1 or not _IS_WINDOWS:
                 raise
             time.sleep(delay * (attempt + 1))
 
