@@ -81,6 +81,16 @@ class ProcessRegistry:
         self.lock = threading.Lock()
         self.children = {}
         self.priority = 'normal'
+        self.cancelled = False
+
+    def launch(self, label, args, **kwargs):
+        """Serialize child creation with cancellation; never spawn after cancel."""
+        with self.lock:
+            if self.cancelled:
+                return None
+            p = subprocess.Popen(args, **kwargs)
+            self.children[p] = (label, time.monotonic())
+            return p
 
     def add(self, p, label):
         with self.lock:
@@ -174,6 +184,7 @@ class ProcessRegistry:
     def terminate_all(self) -> int:
         """Safely terminate only active child process trees owned by this registry."""
         with self.lock:
+            self.cancelled = True
             procs = [p for p in self.children if p.poll() is None]
         terminated = 0
         for p in procs:
