@@ -136,14 +136,12 @@ def compile_one(
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
     try:
         with log.open('wb') as f:
-            with subprocess.Popen(
-                [str(compiler), *flags, '-c', str(src), '-o', str(tmp)],
-                stdout=f,
-                stderr=subprocess.STDOUT,
-                creationflags=creationflags,
-            ) as r:
-                if registry:
-                    registry.add(r, src.name)
+            args = [str(compiler), *flags, '-c', str(src), '-o', str(tmp)]
+            kwargs = dict(stdout=f, stderr=subprocess.STDOUT, creationflags=creationflags)
+            r = registry.launch(src.name, args, **kwargs) if registry else subprocess.Popen(args, **kwargs)
+            if r is None:
+                return src.name, 'failed'
+            with r:
                 try:
                     code = r.wait()
                 finally:
