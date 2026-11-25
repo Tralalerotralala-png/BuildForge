@@ -1,11 +1,17 @@
 # BuildForge release gates
 
-## 0.6 integration candidate — combined CI required
+## 0.7.0-rc.1 — integration candidate
+- Opt-in bounded slow-target retry with effective override tracking.
+- Disposable compiler/linker compatibility probe.
+- Combined Windows/Linux source checks and portable packaging passed for the integrated feature branch.
+- Continue toward 1.0 using [release gate #9](https://github.com/Tralalerotralala-png/BuildForge/issues/9). Do not treat CI as clean-machine installer or native NDK validation.
+
+## Implemented in 0.6 integration candidate
 - Bounded dashboard event handling and remaining-unit count.
 - Optional external LLD and link heartbeat.
 - Session and selected-unit cancellation admission guards.
 - Read-only full cache audit on a background UI worker.
-- Do not distribute as a release until combined Windows/Linux CI and packaging checks pass.
+- Combined CI is necessary but not sufficient for a stable release.
 
 ## Implemented in 0.5 development beta
 - Owned-process-tree cancellation (`cancelfile` + `ProcessRegistry.terminate_all()`) with safe lock release and preserved cache hits.
