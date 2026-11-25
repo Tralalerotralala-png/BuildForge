@@ -44,7 +44,7 @@ Android AArch64 and x86-64 ELF relocatable objects, C17/C++17, explicit include 
 
 ## Windows packaging
 
-`BUILD_WINDOWS_EXE.cmd` is a PyInstaller recipe for an already installed Python/PyInstaller environment. It creates `dist/BuildForge/BuildForge.exe` plus dependencies on Windows. The source distribution includes no executable. Install optional `psutil` in that same environment for richer Windows telemetry. `BuildForge.iss` is an optional Inno Setup installer recipe requiring that built directory and Inno Setup 6.
+`BUILD_WINDOWS_EXE.cmd` is a PyInstaller recipe for an already installed Python/PyInstaller environment. It creates `dist/BuildForge/BuildForge.exe` plus dependencies on Windows. The source distribution includes no executable. Install optional `psutil` in that same environment for richer Windows telemetry. `BuildForge.iss` is an optional Inno Setup installer recipe requiring that built directory and Inno Setup 6. The CI release-smoke matrix exercises Python 3.9/3.11, frozen GUI and engine startup, a real hosted Windows NDK compile/link/cache check, and installer install/uninstall. Hosted runner results do not replace a standard-user clean-machine test or Android device execution.
 
 ## Tests
 

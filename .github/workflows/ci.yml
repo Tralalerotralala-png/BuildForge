@@ -11,25 +11,68 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        python: ['3.9', '3.11']
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python }}
       - name: Install Linux Clang/LLD
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y clang lld
       - run: python -m unittest discover -v
       - name: Build Windows portable app
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.python == '3.11'
         run: |
           python -m pip install pyinstaller psutil
           python -m PyInstaller --noconfirm --clean --onedir --console --name BuildForge --hidden-import engine --hidden-import resource_control app.py
           & .\dist\BuildForge\BuildForge.exe --engine --help
+          if ($LASTEXITCODE -ne 0) { throw 'Frozen engine failed' }
+          & .\dist\BuildForge\BuildForge.exe --gui-smoke-test
+          if ($LASTEXITCODE -ne 0) { throw 'Frozen GUI failed' }
+      - name: Native Android NDK compile, link and cache smoke
+        if: runner.os == 'Windows' && matrix.python == '3.11'
+        run: python tests/windows_ndk_smoke.py dist/BuildForge/BuildForge.exe
+      - name: Build and smoke-test per-user Inno Setup installer
+        if: runner.os == 'Windows' && matrix.python == '3.11'
+        shell: pwsh
+        run: |
+          $iscc = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw 'Inno Setup 6 not found on runner' }
+          & $iscc BuildForge.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
+          $setup = Get-ChildItem installer\*-Setup.exe | Select-Object -First 1
+          if (-not $setup) { throw 'Setup executable not found' }
+          $target = Join-Path $env:RUNNER_TEMP 'BuildForge Installed Smoke'
+          $result = Start-Process -FilePath $setup.FullName -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',('/DIR="' + $target + '"')) -Wait -PassThru
+          if ($result.ExitCode -ne 0) { throw "Install failed: $($result.ExitCode)" }
+          try {
+            $app = Join-Path $target 'BuildForge.exe'
+            & $app --gui-smoke-test
+            if ($LASTEXITCODE -ne 0) { throw 'Installed GUI failed' }
+            & $app --engine --help
+            if ($LASTEXITCODE -ne 0) { throw 'Installed engine failed' }
+          } finally {
+            $uninstaller = Get-ChildItem $target -Filter 'unins*.exe' | Select-Object -First 1
+            if (-not $uninstaller) { throw 'Uninstaller not found' }
+            $result = Start-Process -FilePath $uninstaller.FullName -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+            if ($result.ExitCode -ne 0) { throw "Uninstall failed: $($result.ExitCode)" }
+            if (Test-Path (Join-Path $target 'BuildForge.exe')) { throw 'Application remained after uninstall' }
+          }
+          Get-FileHash -Algorithm SHA256 $setup.FullName | Format-List | Out-File installer\SHA256.txt -Encoding utf8
       - uses: actions/upload-artifact@v4
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.python == '3.11'
+        with:
+          name: BuildForge-Windows-installer-candidate
+          path: installer/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows' && matrix.python == '3.11'
         with:
           name: BuildForge-Windows-beta
           path: dist/BuildForge/

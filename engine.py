@@ -1,4 +1,5 @@
 """Local Android ARM64/x86-64 object compiler, compatible with the legacy object cache."""
+from __future__ import annotations
 import argparse
 import concurrent.futures as cf
 import hashlib
