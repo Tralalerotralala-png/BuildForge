@@ -93,7 +93,7 @@ def cpu_times():
 class App:
     def __init__(self, root):
         self.root = root
-        root.title('BuildForge | Local C++ build workbench · 0.5 beta')
+        root.title('BuildForge | Local C++ build workbench · 0.7.0-rc.1')
         root.geometry('1120x860')
         root.minsize(880, 720)
         self.q = queue.Queue()
@@ -165,7 +165,7 @@ class App:
 
         top = ttk.Frame(outer)
         top.pack(fill='x')
-        ttk.Label(top, text='BuildForge  0.5 beta', style='Title.TLabel').pack(side='left')
+        ttk.Label(top, text='BuildForge  0.7.0-rc.1', style='Title.TLabel').pack(side='left')
         ttk.Label(top, text='LOCAL • PRIVATE • RESUMABLE', style='Sub.TLabel').pack(side='right')
         ttk.Label(
             outer, text='Android NDK C++ object compiler · no cloud uploads or dependencies', style='Sub.TLabel'
