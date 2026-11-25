@@ -49,3 +49,7 @@ Cross-platform unit and integration tests verify process classification/recovery
 ## Design references
 
 [Ninja job pools](https://ninja-build.org/manual.html), [CMake job pools](https://cmake.org/cmake/help/latest/prop_gbl/JOB_POOLS.html), [ccache](https://ccache.dev/), [sccache](https://github.com/mozilla/sccache), [psutil](https://psutil.readthedocs.io/). These are design references, not bundled dependencies or copied implementation. MIT license for the original BuildForge source; third-party components retain their licenses.
+
+### Selected compiler cancellation (development)
+
+Select active compiler rows and use **Cancel selected compiler units…** to request cancellation of those exact unit names in the current session. Other units continue. The request is session-specific and cumulative; it never accepts arbitrary PIDs. A unit which finishes before the request takes effect may remain successfully compiled. A cancelled unit is incomplete and can be retried on a subsequent resume, optionally with an explicit O0 override. No automatic retry or guaranteed descendant termination; termination remains best-effort. Keep the existing cache and flags for other units. This feature builds on the session cancellation admission guard.

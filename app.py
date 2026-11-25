@@ -98,6 +98,8 @@ class App:
         self.proc = None
         self.stopfile = None
         self.cancelfile = None
+        self.unit_cancel_file = None
+        self.unit_cancel_requests = set()
         self.busy = False
         self.closing = False
         self.matches = []
@@ -316,6 +318,7 @@ class App:
         ttk.Button(rt, text='Copy selected active filenames for next retry', command=self.copy_active).pack(
             anchor='w', pady=(0, 4)
         )
+        ttk.Button(rt, text='Cancel selected compiler units…', command=self.cancel_selected).pack(anchor='w', pady=(0, 4))
         logs = ttk.Frame(rt)
         logs.pack(fill='both', expand=True)
         self.logs = tk.Text(
@@ -712,6 +715,9 @@ class App:
         self.cancelfile = jobs / (ident + '.cancel')
         c['stopfile'] = str(self.stopfile)
         c['cancelfile'] = str(self.cancelfile)
+        self.unit_cancel_file = jobs / (ident + '.unit-cancel.json')
+        self.unit_cancel_requests = set()
+        c['unit_cancel_file'] = str(self.unit_cancel_file)
         self.controlfile = jobs / (ident + '.budget.json')
         c['controlfile'] = str(self.controlfile)
         c['budget'] = self.budget.get()
@@ -834,6 +840,30 @@ class App:
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
         self.status.set('Target lines copied. Paste in Target & diagnose after this build stops.')
+
+    def cancel_selected(self):
+        if not (self.proc and self.unit_cancel_file):
+            return
+        names = {str(self.live_units.item(i, 'values')[0]) for i in self.live_units.selection()}
+        if not names:
+            messagebox.showinfo('Cancel selected units', 'Select one or more active compiler rows.')
+            return
+        names -= self.unit_cancel_requests
+        if not names:
+            return
+        if not messagebox.askyesno('Cancel selected units',
+                                  'Request cancellation of only these source units?\n\n'
+                                  + '\n'.join(sorted(names)) +
+                                  '\n\nOther workers continue. Cancelled units may require a later retry.',
+                                  icon='warning'):
+            return
+        try:
+            requested = self.unit_cancel_requests | names
+            atomic_json(self.unit_cancel_file, {'units': sorted(requested)})
+            self.unit_cancel_requests = requested
+            self.append('Selected cancellation requested: ' + ', '.join(sorted(names)), tag='WARNING')
+        except OSError as e:
+            messagebox.showerror('Cancellation request failed', str(e))
 
     def graceful(self):
         if self.proc and self.stopfile:
@@ -994,6 +1024,8 @@ class App:
                     self.active_output = None
                     self.controlfile = None
                     self.cancelfile = None
+                    self.unit_cancel_file = None
+                    self.unit_cancel_requests = set()
                     self.live_units.delete(*self.live_units.get_children())
                     self.freeze_inputs(False)
                     self.stop_btn.configure(state='disabled')

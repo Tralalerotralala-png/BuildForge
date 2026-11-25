@@ -82,11 +82,12 @@ class ProcessRegistry:
         self.children = {}
         self.priority = 'normal'
         self.cancelled = False
+        self.cancelled_labels = set()
 
     def launch(self, label, args, **kwargs):
         """Serialize child creation with cancellation; never spawn after cancel."""
         with self.lock:
-            if self.cancelled:
+            if self.cancelled or label in self.cancelled_labels:
                 return None
             p = subprocess.Popen(args, **kwargs)
             self.children[p] = (label, time.monotonic())
@@ -186,6 +187,18 @@ class ProcessRegistry:
         with self.lock:
             self.cancelled = True
             procs = [p for p in self.children if p.poll() is None]
+        return self._terminate(procs)
+
+    def cancel_labels(self, labels):
+        """Latch only the named units; never cancel another registered worker."""
+        labels = set(labels)
+        with self.lock:
+            self.cancelled_labels.update(labels)
+            procs = [p for p, (label, _) in self.children.items()
+                     if label in labels and p.poll() is None]
+        return self._terminate(procs)
+
+    def _terminate(self, procs):
         terminated = 0
         for p in procs:
             if p.poll() is not None:

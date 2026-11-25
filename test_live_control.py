@@ -56,6 +56,34 @@ class LiveTests(unittest.TestCase):
                 proc.kill()
                 proc.wait(timeout=5)
 
+    def test_selected_cancel_leaves_other_worker_running(self):
+        reg = ProcessRegistry()
+        cmd = [sys.executable, '-c', 'import time; time.sleep(30)']
+        a = reg.launch('a.cpp', cmd)
+        b = reg.launch('b.cpp', cmd)
+        try:
+            self.assertEqual(reg.cancel_labels({'a.cpp'}), 1)
+            self.assertIsNotNone(a.wait(timeout=5))
+            self.assertIsNone(b.poll())
+            self.assertIsNone(reg.launch('a.cpp', cmd))
+            self.assertFalse(reg.cancelled)
+            self.assertEqual(reg.cancel_labels({'unrelated.cpp'}), 0)
+            self.assertIsNone(b.poll())
+        finally:
+            for p in (a, b):
+                if p.poll() is None:
+                    p.kill()
+                    p.wait(timeout=5)
+
+    def test_selected_cancel_blocks_delayed_unit_only(self):
+        reg = ProcessRegistry()
+        self.assertEqual(reg.cancel_labels({'late.cpp'}), 0)
+        with patch('resource_control.subprocess.Popen') as spawn:
+            self.assertIsNone(reg.launch('late.cpp', ['unused']))
+            spawn.assert_not_called()
+            self.assertIs(reg.launch('other.cpp', ['unused']), spawn.return_value)
+            spawn.assert_called_once()
+
     def test_cancel_latches_before_worker_spawn(self):
         reg = ProcessRegistry()
         self.assertEqual(reg.terminate_all(), 0)
