@@ -65,6 +65,7 @@ def defaults():
         arch='aarch64',
         overrides={},
         slow_seconds=900,
+        retry_slow_targets=False,
         link=False,
         link_name='liboutput.so',
         linker_path='',
@@ -402,6 +403,10 @@ class App:
         b_miss = ttk.Button(row, text='Audit cache fingerprints', command=self.find_missing)
         b_miss.pack(side='left', padx=6)
         self.inputs.append(b_miss)
+        self.v['retry_slow_targets'] = tk.BooleanVar(value=False)
+        retry = ttk.Checkbutton(target, text='Retry explicitly targeted slow failures once at O0 (opt-in)', variable=self.v['retry_slow_targets'])
+        retry.pack(anchor='w', pady=4)
+        self.inputs.append(retry)
         ttk.Label(
             target,
             text='A slow warning is not a hang diagnosis. Timing reports are written to per-file logs only when Clang exits. '
@@ -478,6 +483,7 @@ class App:
             recursive=self.v['recursive'].get(),
             overrides=parse_overrides(self.overrides.get('1.0', 'end')),
             slow_seconds=self.v['slow_seconds'].get(),
+            retry_slow_targets=self.v['retry_slow_targets'].get(),
             link=self.v['link'].get(),
             link_name=self.v['link_name'].get(),
             linker_path=self.v['linker_path'].get().strip(),
@@ -1067,6 +1073,8 @@ class App:
                         self.status.set(v['message'])
                     elif ev == 'finished':
                         self.append(json.dumps(v, indent=2), tag='PHASE' if v['all_translated_objects_ready'] else 'WARNING')
+                        if v.get('retry_overrides'):
+                            self.append('To retain successful retry cache entries on resume, review and save these target overrides:\n' + format_overrides(v['retry_overrides']), tag='WARNING')
                         self.status.set(
                             (
                                 'Shared library linked; device test still required.'
