@@ -1121,7 +1121,40 @@ class App:
         self.root.destroy()
 
 
+def gui_smoke_test():
+    """Initialize the real Tk interface using a disposable profile directory."""
+    import tempfile
+
+    global HOME
+    previous_home = HOME
+    with tempfile.TemporaryDirectory(prefix='buildforge-gui-smoke-') as directory:
+        HOME = Path(directory)
+        root = None
+        try:
+            root = tk.Tk()
+            errors = []
+            root.report_callback_exception = lambda *exc: errors.append(exc)
+            root.withdraw()
+            app = App(root)
+            root.update_idletasks()
+            root.update()
+            if errors:
+                raise RuntimeError(str(errors[0][1]))
+            if not app.start_btn.winfo_exists():
+                raise RuntimeError('BuildForge main controls did not initialize.')
+            print('BuildForge GUI smoke test passed.')
+        finally:
+            try:
+                if root is not None:
+                    root.destroy()
+            finally:
+                HOME = previous_home
+    return 0
+
+
 if __name__ == '__main__':
+    if sys.argv[1:] == ['--gui-smoke-test']:
+        raise SystemExit(gui_smoke_test())
     if '--engine' in sys.argv:
         sys.argv.remove('--engine')
         from engine import main
