@@ -131,6 +131,7 @@ def plan(c):
             raise ValueError('Invalid preprocessor definition.')
         flags.append('-D' + d)
     overrides_for(sources, c.get('overrides', {}))
+    link_stage.response_text(out, [s.stem + '.o' for s in sources])
     link_stage.validate_config(c)
     if type(c.get('retry_slow_targets', False)) is not bool:
         raise ValueError('Retry slow targets must be boolean.')
@@ -438,7 +439,7 @@ def run(c, output_arg):
                 {'schema': 1, 'base_context': fingerprint(base, flags), 'overrides': overrides, 'objects': entries},
             )
             tmp = out / ('objects.rsp.' + token + '.tmp')
-            tmp.write_text(''.join(f'"{(out / (s.stem + ".o")).as_posix()}"\n' for s in sources), encoding='utf-8')
+            tmp.write_text(link_stage.response_text(out, [e['object'] for e in entries]), encoding='utf-8')
             os.replace(tmp, out / 'objects.rsp')
             if c.get('link'):
                 event('phase', message='Strict shared-library link; unresolved symbols fail the link.')
