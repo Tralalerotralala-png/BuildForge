@@ -104,6 +104,99 @@ def atomic_json(path: Path, value: dict) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def parse_depfile(text: str) -> list[Path]:
+    """Parse a single Clang Make dependency rule with a fixed target."""
+    text = text.replace('\\\r\n', ' ').replace('\\\n', ' ').strip()
+    prefix = 'buildforge_dep:'
+    if not text.startswith(prefix) or '\n' in text or '\r' in text:
+        raise ValueError('Invalid or unsupported compiler dependency file.')
+    body = text[len(prefix):]
+    tokens = []
+    token = []
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == '\\':
+            if i + 1 == len(body):
+                raise ValueError('Incomplete dependency escape.')
+            nxt = body[i + 1]
+            if nxt.isspace() or nxt in ('#', '\\'):
+                token.append(nxt)
+                i += 2
+                continue
+            token.append(ch)
+        elif ch == '$':
+            if i + 1 >= len(body) or body[i + 1] != '$':
+                raise ValueError('Unsupported dependency variable.')
+            token.append('$')
+            i += 2
+            continue
+        elif ch == '#':
+            raise ValueError('Unescaped dependency comment.')
+        elif ch.isspace():
+            if token:
+                tokens.append(''.join(token))
+                token = []
+        else:
+            token.append(ch)
+        i += 1
+    if token:
+        tokens.append(''.join(token))
+    if not tokens:
+        raise ValueError('Compiler did not report dependencies.')
+    return [Path(t).absolute() for t in tokens]
+
+
+def dependency_snapshot(depfile: Path, src: Path) -> dict:
+    paths = set(parse_depfile(depfile.read_text(encoding='utf-8')))
+    if src.absolute() not in paths:
+        raise ValueError('Compiler dependency list does not contain the source.')
+    if any(not p.is_file() for p in paths):
+        raise ValueError('Compiler dependency is missing or is not a regular file.')
+    return {str(p): digest(p) for p in sorted(paths)}
+
+
+def dependencies_valid(data, src: Path) -> bool:
+    if not isinstance(data, dict) or not data:
+        return False
+    try:
+        paths = {Path(p) for p in data}
+        if src.absolute() not in paths:
+            return False
+        return all(Path(p).is_absolute() and Path(p).is_file()
+                   and isinstance(h, str) and digest(Path(p)) == h
+                   for p, h in data.items())
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def run_compiler(src, args, log, registry, creationflags):
+    kwargs = dict(stdout=log, stderr=subprocess.STDOUT, creationflags=creationflags)
+    proc = registry.launch(src.name, args, **kwargs) if registry else subprocess.Popen(args, **kwargs)
+    if proc is None:
+        return None
+    with proc:
+        try:
+            return proc.wait()
+        finally:
+            if registry:
+                registry.remove(proc)
+
+
+def scan_dependencies(src, out_dir, compiler, flags, registry, creationflags, log):
+    with tempfile.TemporaryDirectory(dir=out_dir, prefix='.bf-deps-') as d:
+        depfile = Path(d) / 'scan.d'
+        with tempfile.TemporaryFile(mode='w+b') as diagnostics:
+            code = run_compiler(src, [str(compiler), *flags, '-M', '-MF', str(depfile),
+                                     '-MT', 'buildforge_dep', str(src)], diagnostics,
+                                registry, creationflags)
+            if code != 0:
+                diagnostics.seek(0)
+                log.write_bytes(diagnostics.read())
+                raise ValueError('Dependency preprocessing failed or was cancelled.')
+        return dependency_snapshot(depfile, src)
+
+
 def compile_one(
     src: Path,
     out_dir: Path,
@@ -112,6 +205,7 @@ def compile_one(
     context: str,
     reuse: bool,
     registry=None,
+    *, track_dependencies=False,
 ) -> tuple[str, str]:
     machine = 62 if any(f.startswith('--target=x86_64-') for f in flags) else 183
     if src.suffix.lower() == '.c':
@@ -123,38 +217,54 @@ def compile_one(
     stamp = out_dir / (src.stem + '.json')
     log = out_dir / (src.stem + '.log')
     key = {'source_sha256': digest(src), 'context_sha256': context}
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+    before = None
+    if track_dependencies:
+        try:
+            before = scan_dependencies(src, out_dir, compiler, flags, registry, creationflags, log)
+        except (OSError, ValueError) as e:
+            with log.open('ab') as f:
+                f.write(('\nDependency scan: ' + str(e)).encode('utf-8', errors='replace'))
+            return src.name, 'failed'
     if reuse and obj.exists() and stamp.exists():
         try:
             s = json.loads(stamp.read_text(encoding='utf-8'))
             if isinstance(s, dict) and s.get('key') == key and is_elf_object(obj, machine) and s.get('object_sha256') == digest(obj):
-                return src.name, 'cached'
+                if not track_dependencies or s.get('dependencies') == before:
+                    return src.name, 'cached'
         except (OSError, ValueError):
             pass
     # Keep prior object/stamp until replacement succeeds. The run removes the
     # ready manifest first, so a stale object cannot make the new run ready.
     with tempfile.NamedTemporaryFile(dir=out_dir, suffix='.tmp.o', delete=False) as f:
         tmp = Path(f.name)
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+    depfile = tmp.with_suffix('.d')
     try:
         with log.open('wb') as f:
             args = [str(compiler), *flags, '-c', str(src), '-o', str(tmp)]
-            kwargs = dict(stdout=f, stderr=subprocess.STDOUT, creationflags=creationflags)
-            r = registry.launch(src.name, args, **kwargs) if registry else subprocess.Popen(args, **kwargs)
-            if r is None:
-                return src.name, 'failed'
-            with r:
-                try:
-                    code = r.wait()
-                finally:
-                    if registry:
-                        registry.remove(r)
-        if code or not is_elf_object(tmp, machine) or digest(src) != key['source_sha256']:
+            if track_dependencies:
+                args += ['-MD', '-MF', str(depfile), '-MT', 'buildforge_dep']
+            code = run_compiler(src, args, f, registry, creationflags)
+        if code != 0 or not is_elf_object(tmp, machine) or digest(src) != key['source_sha256']:
             return src.name, 'failed'
+        if track_dependencies:
+            try:
+                if dependency_snapshot(depfile, src) != before:
+                    raise ValueError('Dependencies changed during compilation.')
+            except (OSError, ValueError) as e:
+                with log.open('ab') as f:
+                    f.write(('\nDependency validation: ' + str(e)).encode('utf-8', errors='replace'))
+                return src.name, 'failed'
         _replace_with_retry(tmp, obj)
-        atomic_json(stamp, {'key': key, 'object_sha256': digest(obj)})
+        data = {'key': key, 'object_sha256': digest(obj)}
+        if track_dependencies:
+            data['dependencies'] = before
+        atomic_json(stamp, data)
         return src.name, 'compiled'
     finally:
         tmp.unlink(missing_ok=True)
+        if track_dependencies:
+            depfile.unlink(missing_ok=True)
 
 
 def _win_memory_status():

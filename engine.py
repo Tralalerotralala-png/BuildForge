@@ -20,6 +20,7 @@ from cache_compat import (
     can_launch,
     compile_one,
     digest,
+    dependencies_valid,
     header_digest,
     is_elf_object,
     private,
@@ -53,6 +54,9 @@ def plan(c):
     ndk = Path(c['ndk']).resolve()
     includes = [Path(s).resolve() for s in c.get('includes', []) if s.strip()]
     gos = bool(c.get('gos'))
+    track = c.get('track_dependencies', False)
+    if type(track) is not bool or (track and gos):
+        raise ValueError('Strict dependency tracking requires a generic profile and a boolean setting.')
     if not src.is_dir() or not ndk.is_dir():
         raise ValueError('Source or NDK folder does not exist.')
     if any(not p.is_dir() for p in includes):
@@ -198,6 +202,7 @@ def find_missing_units(c) -> list[str]:
                 and data.get('key') == key
                 and is_elf_object(obj, machine)
                 and data.get('object_sha256') == digest(obj)
+                and (not c.get('track_dependencies') or dependencies_valid(data.get('dependencies'), s))
             )
         except (OSError, ValueError):
             valid = False
@@ -313,7 +318,8 @@ def run(c, output_arg):
                               log_tail='Selected cancellation requested before launch.')
                         continue
                     future = pool.submit(
-                        compile_one, s, out, compiler, unit_flags[s.name], contexts[s.name], True, registry
+                        compile_one, s, out, compiler, unit_flags[s.name], contexts[s.name], True, registry,
+                        **({'track_dependencies': True} if c.get('track_dependencies') else {})
                     )
                     running.add(future)
                     submitted[future] = time.monotonic()
@@ -427,6 +433,7 @@ def run(c, output_arg):
                     not is_elf_object(obj, machine)
                     or stamp.get('key') != key
                     or stamp.get('object_sha256') != digest(obj)
+                    or (c.get('track_dependencies') and not dependencies_valid(stamp.get('dependencies'), src))
                 ):
                     raise ValueError('Object or source changed before manifest: ' + src.name)
                 entries.append(
@@ -437,6 +444,7 @@ def run(c, output_arg):
                         'object_sha256': stamp['object_sha256'],
                         'flags': unit_flags[src.name],
                         'language': 'C17' if src.suffix.lower() == '.c' else 'C++17',
+                        **({'dependencies': stamp['dependencies']} if c.get('track_dependencies') else {}),
                     }
                 )
             atomic_json(
@@ -469,6 +477,7 @@ def run(c, output_arg):
             'retry_overrides': retried,
             'mixed_flags': any(unit_flags[n] != flags for n in unit_flags),
             'link_requested': bool(c.get('link')),
+            'track_dependencies': bool(c.get('track_dependencies')),
         }
         atomic_json(out / 'safe_status.json', status)
         event('finished', **status)
