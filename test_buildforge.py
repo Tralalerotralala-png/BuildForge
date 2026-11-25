@@ -163,7 +163,30 @@ class Tests(unittest.TestCase):
                 headroom=0.5,
                 arch='aarch64',
             )
-            self.assertEqual(engine.find_missing_units(c), ['b.cpp', 'c.cpp'])
+            base = {'compiler_sha256': 'synthetic', 'version': 'synthetic', 'headers': 'synthetic'}
+            _, _, _, _, _, flags, *_ = engine.plan(c)
+            context = engine.fingerprint(base, flags)
+            old.atomic_json(out / 'a.json', {
+                'key': {'source_sha256': old.digest(src / 'a.cpp'), 'context_sha256': context},
+                'object_sha256': old.digest(out / 'a.o'),
+            })
+            with patch('engine.compilation_context', return_value=(base, [])):
+                before = {p.name: p.read_bytes() for p in out.iterdir()}
+                self.assertEqual(engine.find_missing_units(c), ['b.cpp', 'c.cpp'])
+                self.assertEqual({p.name: p.read_bytes() for p in out.iterdir()}, before)
+                (out / 'a.o').write_bytes(_fake_elf_object(183) + b'changed')
+                self.assertEqual(engine.find_missing_units(c), ['a.cpp', 'b.cpp', 'c.cpp'])
+                (out / 'a.o').write_bytes(before['a.o'])
+                c['overrides'] = {'a.cpp': {'opt': '0', 'timing': True}}
+                self.assertEqual(engine.find_missing_units(c), ['a.cpp', 'b.cpp', 'c.cpp'])
+                c.pop('overrides')
+                (src / 'a.cpp').write_text('int f(){return 2;}', encoding='utf-8')
+                self.assertEqual(engine.find_missing_units(c), ['a.cpp', 'b.cpp', 'c.cpp'])
+                (out / 'a.json').write_text('[]', encoding='utf-8')
+                self.assertEqual(engine.find_missing_units(c), ['a.cpp', 'b.cpp', 'c.cpp'])
+                (out / '.compile.lock').touch()
+                with self.assertRaisesRegex(ValueError, 'locked'):
+                    engine.find_missing_units(c)
 
     @unittest.skipUnless(os.name != 'nt' and shutil.which('clang++'), 'Synthetic Linux Clang test')
     def test_actual_arm64_cache_and_graceful_stop(self):

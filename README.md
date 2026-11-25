@@ -1,4 +1,4 @@
-# BuildForge 0.5 — local C++ build & targeted retry workbench
+# BuildForge 0.6 integration candidate — local C++ build & targeted retry workbench
 
 Local, resumable C/C++ object compilation and optional strict Android ELF shared-library linking. Source edition, not a certified production release.
 
@@ -10,7 +10,7 @@ Extract to a **new folder**, then run `OPEN_BUILDFORGE.cmd` using Python 3.9+ wi
 
 - **Safe owned-process cancellation**: **Cancel active jobs…** in the UI triggers a session cancel token that terminates only compiler process trees spawned by that engine instance, cleanly releasing `.compile.lock` and preserving already-completed cached objects.
 - **Slow-then-failed diagnostics**: `Analyze session log…` now retains slow unit candidates even when active workers later exit as `failed` or are interrupted, across both `0.4+` named logs and legacy exhausted-tail logs.
-- **Missing / failed unit finder**: **Find missing / failed units** in **Target & diagnose** scans the selected output directory and offers to populate units without valid `.o` / `.json` pairs directly into the override editor (e.g., as `unit.cpp | 0 | timing`).
+- **Missing / failed unit finder**: **Audit cache fingerprints** in **Target & diagnose** scans the selected output directory and checks full source, object and context fingerprints without altering overrides.
 - **Windows hardening**: `CREATE_NO_WINDOW` on Windows compiler/linker subprocesses, transient `PermissionError` retry on atomic object/JSON replacement, null-safe `CreationDate` handling and `ld.lld` recognition in `recovery.py`, and Unity Hub NDK auto-discovery.
 - **UI polish**: Last-used profile persistence (`state.json`), profile deletion, color-tagged live build console, unit failure log tails surfaced inline, scrollbars on active/recovery tables, and **Clear log**.
 
@@ -18,7 +18,7 @@ Extract to a **new folder**, then run `OPEN_BUILDFORGE.cmd` using Python 3.9+ wi
 
 1. Finish, stop, or cancel the old build. If it is unresponsive, use **Inspect / recover** only after checking the exact output path and process identities. Do not delete cached objects.
 2. Load your previous profile. Keep source, output, NDK, include order, API, base optimization, definitions and architecture unchanged. If the previous job is still running, do not start this build.
-3. Open **Target & diagnose**. Enter one source filename per line followed by ` | 0` for O0, ` | 1` for O1, or ` | 2` for O2. Use ` | same | timing` to leave optimization unchanged and request Clang's `-ftime-report`; ` | 0 | timing` combines both. You can also click **Analyze session log…** or **Find missing / failed units** to populate candidates. Names must match existing source filenames exactly. Invalid/duplicate targets are rejected before touching the output.
+3. Open **Target & diagnose**. Enter one source filename per line followed by ` | 0` for O0, ` | 1` for O1, or ` | 2` for O2. Use ` | same | timing` to leave optimization unchanged and request Clang's `-ftime-report`; ` | 0 | timing` combines both. You can also click **Analyze session log…** or **Audit cache fingerprints** to review candidates. Names must match existing source filenames exactly. Invalid/duplicate targets are rejected before touching the output.
 4. **Start / resume build**. The whole build plan is checked, but only cache misses or units with changed flags are compiled. Keep target overrides saved with your profile to reuse them on future runs. Clearing overrides returns those units to the base flags and will recompile them if needed.
 5. Read the per-file `.log` and `unit_timings.json`. `object_manifest.json` records source/object digests, per-unit contexts and flags. A compiler timing report is emitted by Clang at exit, not a live optimizer trace.
 
@@ -49,3 +49,15 @@ Cross-platform unit and integration tests verify process classification/recovery
 ## Design references
 
 [Ninja job pools](https://ninja-build.org/manual.html), [CMake job pools](https://cmake.org/cmake/help/latest/prop_gbl/JOB_POOLS.html), [ccache](https://ccache.dev/), [sccache](https://github.com/mozilla/sccache), [psutil](https://psutil.readthedocs.io/). These are design references, not bundled dependencies or copied implementation. MIT license for the original BuildForge source; third-party components retain their licenses.
+
+### Read-only cache audit
+
+The Target & diagnose cache audit checks source SHA-256, ELF target/type, object SHA-256, and the same compiler/header/per-unit context used by the normal build. The scan runs off the GUI thread and does not change objects, stamps, manifests or overrides. A missing or stale entry is not proof of a slow compiler; resume normally unless you deliberately choose a targeted override. The audit refuses a visibly locked output and remains advisory (no guarantee against concurrent external edits); the build still validates under its own lock. Keep the selected toolchain and input files stable.
+
+### Selected compiler cancellation (development)
+
+Select active compiler rows and use **Cancel selected compiler units…** to request cancellation of those exact unit names in the current session. Other units continue. The request is session-specific and cumulative; it never accepts arbitrary PIDs. A unit which finishes before the request takes effect may remain successfully compiled. A cancelled unit is incomplete and can be retried on a subsequent resume, optionally with an explicit O0 override. No automatic retry or guaranteed descendant termination; termination remains best-effort. Keep the existing cache and flags for other units. This feature builds on the session cancellation admission guard.
+
+### Optional external LLVM linker (development)
+
+The Link tab accepts an explicit absolute path to an existing `ld.lld` / `ld.lld.exe`. Leave it blank for the NDK driver's default. The driver receives `-fuse-ld=<absolute path>` and the selected executable must identify itself as LLD. No automatic downloads or silent fallback. Older NDK drivers and newer LLD releases may be incompatible; test on a separate synthetic project first. The link stage reports elapsed time, the selected linker's version and cancellation status; it never invents a completion percentage. A cancelled link preserves a previous library. Cancellation is best-effort and still depends on process-tree termination support. Compiler cache keys are unchanged by linker selection.
