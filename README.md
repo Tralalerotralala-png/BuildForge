@@ -1,10 +1,16 @@
-# BuildForge 0.6 integration candidate — local C++ build & targeted retry workbench
+# BuildForge 0.7.0-rc.1 — local C++ build & targeted retry workbench
 
-Local, resumable C/C++ object compilation and optional strict Android ELF shared-library linking. Source edition, not a certified production release.
+Local, resumable C/C++ object compilation and optional strict Android ELF shared-library linking. 0.7 integration candidate, not a certified production release. Linux/Windows source checks and portable Windows packaging are validated by CI; native Windows NDK, installer and device tests remain release gates (see [ROADMAP.md](ROADMAP.md)).
 
 ## Start on Windows
 
 Extract to a **new folder**, then run `OPEN_BUILDFORGE.cmd` using Python 3.9+ with Tkinter. An existing Android NDK (including Unity Hub Editor AndroidPlayer NDK installations) is auto-discovered when available. Optional `psutil` enables richer hardware/worker telemetry and full process-tree Windows priority controls; stdlib fallbacks provide total RAM detection and root-process Windows priority control when `psutil` is absent. No cloud service or telemetry upload. Use saved profiles or import a previous job JSON from the local `BuildForgeARM64/jobs` directory. Do not start a second engine against any active output directory.
+
+## What's new in 0.7 candidate
+
+- Opt-in, one-time O0 retry of explicitly targeted slow failures with recorded effective fingerprints.
+- Isolated compiler/linker compatibility probe for synthetic Android AArch64 and x86-64 ELF output.
+- Includes 0.6 dashboard, cache-audit, external LLD and selective cancellation improvements.
 
 ## What's new in 0.5 beta
 
