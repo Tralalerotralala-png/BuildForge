@@ -116,9 +116,9 @@ class Tests(unittest.TestCase):
                     raise PermissionError('transient lock')
                 return real_replace(src, dst)
 
-            with patch('cache_compat.os.name', 'nt'), patch('cache_compat.os.replace', side_effect=flaky_replace), patch(
-                'cache_compat.time.sleep'
-            ):
+            with patch('cache_compat._IS_WINDOWS', True), patch(
+                'cache_compat.os.replace', side_effect=flaky_replace
+            ), patch('cache_compat.time.sleep'):
                 old.atomic_json(target, {'ok': True})
             self.assertEqual(calls['n'], 2)
             self.assertEqual(json.loads(target.read_text(encoding='utf-8')), {'ok': True})
