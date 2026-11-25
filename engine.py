@@ -139,16 +139,64 @@ def plan(c):
     return sources, out, ndk, compiler, roots, flags, workers, reserve, headroom
 
 
+def compilation_context(ndk, compiler, roots):
+    """Use the identical legacy context for compilation and read-only audits."""
+    roots = list(roots)
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+    version = subprocess.check_output(
+        [str(compiler), '--version'], stderr=subprocess.STDOUT, timeout=30, creationflags=creationflags
+    )
+    resource = (
+        Path(
+            subprocess.check_output(
+                [str(compiler), '-print-resource-dir'], text=True, timeout=30, creationflags=creationflags
+            ).strip()
+        )
+        / 'include'
+    )
+    roots += [resource, ndk / 'sources' / 'cxx-stl' / 'llvm-libc++' / 'include']
+    base = {
+        'compiler_sha256': digest(compiler),
+        'version': version.decode(errors='replace'),
+        'headers': header_digest(roots),
+    }
+    return base, roots
+
+
 def find_missing_units(c) -> list[str]:
-    """Return sorted source filenames lacking a valid object and stamp in output."""
-    sources, out, _, _, _, flags, *_ = plan(c)
+    """Read-only audit of source/object/context fingerprints for the selected profile.
+
+    Results are advisory: a subsequent build must revalidate under its own lock.
+    """
+    sources, out, ndk, compiler, roots, flags, *_ = plan(c)
+    lock = out / '.compile.lock'
+    if lock.exists():
+        raise ValueError('Output is locked. Finish the active build before auditing.')
+    base, _ = compilation_context(ndk, compiler, roots)
+    overrides = overrides_for(sources, c.get('overrides', {}))
     machine = 62 if any(f.startswith('--target=x86_64-') for f in flags) else 183
     missing = []
     for s in sources:
         obj = out / (s.stem + '.o')
         stamp = out / (s.stem + '.json')
-        if not obj.is_file() or not stamp.is_file() or not is_elf_object(obj, machine):
+        context = fingerprint(base, flags_for(flags, overrides.get(s.name)))
+        if s.suffix.lower() == '.c':
+            context = hashlib.sha256((context + '|C17').encode()).hexdigest()
+        try:
+            data = json.loads(stamp.read_text(encoding='utf-8'))
+            key = {'source_sha256': digest(s), 'context_sha256': context}
+            valid = (
+                isinstance(data, dict)
+                and data.get('key') == key
+                and is_elf_object(obj, machine)
+                and data.get('object_sha256') == digest(obj)
+            )
+        except (OSError, ValueError):
+            valid = False
+        if not valid:
             missing.append(s.name)
+    if lock.exists():
+        raise ValueError('A build started during the audit. Discarding results.')
     return sorted(missing)
 
 
@@ -172,23 +220,7 @@ def run(c, output_arg):
         for name in ('objects.rsp', 'safe_status.json', 'object_manifest.json', 'link_status.json'):
             (out / name).unlink(missing_ok=True)
         event('phase', message='Checking toolchain and hashing headers; existing cache format preserved.', total=len(sources))
-        version = subprocess.check_output(
-            [str(compiler), '--version'], stderr=subprocess.STDOUT, timeout=30, creationflags=creationflags
-        )
-        resource = (
-            Path(
-                subprocess.check_output(
-                    [str(compiler), '-print-resource-dir'], text=True, timeout=30, creationflags=creationflags
-                ).strip()
-            )
-            / 'include'
-        )
-        roots += [resource, ndk / 'sources' / 'cxx-stl' / 'llvm-libc++' / 'include']
-        base = {
-            'compiler_sha256': digest(compiler),
-            'version': version.decode(errors='replace'),
-            'headers': header_digest(roots),
-        }
+        base, roots = compilation_context(ndk, compiler, roots)
         overrides = overrides_for(sources, c.get('overrides', {}))
         unit_flags = {s.name: flags_for(flags, overrides.get(s.name)) for s in sources}
         contexts = {name: fingerprint(base, f) for name, f in unit_flags.items()}
