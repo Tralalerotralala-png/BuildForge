@@ -395,7 +395,7 @@ class App:
         b = ttk.Button(row, text='Analyze session log…', command=self.analyze_log)
         b.pack(side='left', padx=6)
         self.inputs.append(b)
-        b_miss = ttk.Button(row, text='Find missing / failed units', command=self.find_missing)
+        b_miss = ttk.Button(row, text='Audit cache fingerprints', command=self.find_missing)
         b_miss.pack(side='left', padx=6)
         self.inputs.append(b_miss)
         ttk.Label(
@@ -802,28 +802,37 @@ class App:
         if self.proc or self.busy:
             return
         try:
-            from engine import find_missing_units
-
             c = self.get()
-            missing = find_missing_units(c)
         except Exception as e:
             messagebox.showerror('Check failed', str(e))
             return
+        self.set_busy(True)
+        self.status.set('Auditing cache fingerprints; source and output remain unchanged…')
+
+        def task():
+            try:
+                from engine import find_missing_units
+                self.q.put(('cache_audit', find_missing_units(c)))
+            except Exception as e:
+                self.q.put(('cache_audit_error', str(e)))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def show_cache_audit(self, missing):
+        self.set_busy(False)
+        self.status.set(f'Cache audit complete: {len(missing)} unit(s) need validation or rebuilding.')
         if not missing:
-            messagebox.showinfo('Complete', 'All expected source units already have valid objects and stamps.')
+            messagebox.showinfo('Cache audit', 'All expected units match current source, object and compilation-context fingerprints.')
             return
         preview = '\n'.join(missing[:20]) + (f'\n… and {len(missing) - 20} more' if len(missing) > 20 else '')
-        opt = 'same' if str(c.get('opt', '1')) == '0' else '0'
         if messagebox.askyesno(
-            'Missing / failed units found',
-            f'Found {len(missing)} unit(s) without valid objects:\n\n{preview}\n\n'
-            f'Add them to overrides with optimization={opt} and timing enabled?',
+            'Cache audit',
+            f'{len(missing)} unit(s) have missing, damaged, or stale cache entries:\n\n{preview}\n\n'
+            'This does not prove a slow compiler. A normal resume revalidates and recompiles invalid entries '
+            'using the current profile. Copy the full list of names to the clipboard for review?',
         ):
-            current = parse_overrides(self.overrides.get('1.0', 'end'))
-            for name in missing:
-                current[name] = {'opt': None if opt == 'same' else opt, 'timing': True}
-            self.overrides.delete('1.0', 'end')
-            self.overrides.insert('1.0', format_overrides(current))
+            self.root.clipboard_clear()
+            self.root.clipboard_append('\n'.join(missing))
 
     def copy_active(self):
         selected = self.live_units.selection()
@@ -899,7 +908,13 @@ class App:
         try:
             while True:
                 kind, v = self.q.get_nowait()
-                if kind == 'scan':
+                if kind == 'cache_audit':
+                    self.show_cache_audit(v)
+                elif kind == 'cache_audit_error':
+                    self.set_busy(False)
+                    self.status.set('Cache audit failed; nothing changed.')
+                    messagebox.showerror('Cache audit failed', v)
+                elif kind == 'scan':
                     self.set_busy(False)
                     self.scan_output, self.matches, self.unknown = v
                     self.tabs.select(self.recovery_tab)
