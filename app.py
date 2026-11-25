@@ -67,6 +67,7 @@ def defaults():
         slow_seconds=900,
         link=False,
         link_name='liboutput.so',
+        linker_path='',
         link_system_libs=[],
         link_libraries=[],
         freestanding=False,
@@ -417,6 +418,11 @@ class App:
         e = ttk.Entry(lk, textvariable=self.v['link_name'])
         e.pack(fill='x')
         self.inputs.append(e)
+        self.v['linker_path'] = tk.StringVar(value='')
+        ttk.Label(lk, text='Optional external ld.lld executable (absolute path; blank = NDK default)').pack(anchor='w', pady=(8, 0))
+        e = ttk.Entry(lk, textvariable=self.v['linker_path'])
+        e.pack(fill='x')
+        self.inputs.append(e)
         ttk.Label(lk, text='Additional archive/shared library paths (one per line)').pack(anchor='w', pady=(10, 0))
         self.link_libs = tk.Text(lk, height=4, wrap='none')
         self.link_libs.pack(fill='x')
@@ -468,6 +474,7 @@ class App:
             slow_seconds=self.v['slow_seconds'].get(),
             link=self.v['link'].get(),
             link_name=self.v['link_name'].get(),
+            linker_path=self.v['linker_path'].get().strip(),
             freestanding=self.v['freestanding'].get(),
             link_libraries=[x.strip() for x in self.link_libs.get('1.0', 'end').splitlines() if x.strip()],
             link_system_libs=[x.strip() for x in self.link_system.get('1.0', 'end').splitlines() if x.strip()],

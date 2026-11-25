@@ -49,3 +49,7 @@ Cross-platform unit and integration tests verify process classification/recovery
 ## Design references
 
 [Ninja job pools](https://ninja-build.org/manual.html), [CMake job pools](https://cmake.org/cmake/help/latest/prop_gbl/JOB_POOLS.html), [ccache](https://ccache.dev/), [sccache](https://github.com/mozilla/sccache), [psutil](https://psutil.readthedocs.io/). These are design references, not bundled dependencies or copied implementation. MIT license for the original BuildForge source; third-party components retain their licenses.
+
+### Optional external LLVM linker (development)
+
+The Link tab accepts an explicit absolute path to an existing `ld.lld` / `ld.lld.exe`. Leave it blank for the NDK driver's default. The driver receives `-fuse-ld=<absolute path>` and the selected executable must identify itself as LLD. No automatic downloads or silent fallback. Older NDK drivers and newer LLD releases may be incompatible; test on a separate synthetic project first. The link stage reports elapsed time, the selected linker's version and cancellation status; it never invents a completion percentage. A cancelled link preserves a previous library. Cancellation is best-effort and still depends on process-tree termination support. Compiler cache keys are unchanged by linker selection.

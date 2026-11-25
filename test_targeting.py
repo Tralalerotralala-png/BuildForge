@@ -17,6 +17,20 @@ class TargetTests(unittest.TestCase):
     def test_link_validation(self):
         for name in ['../bad.so','a.dll','lib/evil.so']:
             with self.assertRaises(ValueError):link_stage.validate_config({'link':True,'link_name':name})
+    def test_external_linker_path_validation(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'ld.lld.exe'
+            p.touch()
+            self.assertEqual(link_stage.selected_linker({'linker_path': str(p)}), p)
+            self.assertIsNone(link_stage.selected_linker({}))
+            for raw in ['ld.lld', str(Path(d) / 'missing' / 'ld.lld'), str(Path(d) / 'wrong.exe')]:
+                with self.assertRaises(ValueError):
+                    link_stage.selected_linker({'linker_path': raw})
+            with patch('link_stage.subprocess.check_output', return_value=b'LLD 17.0.0'):
+                self.assertEqual(link_stage.linker_options({'linker_path': str(p)})[0], ['-fuse-ld=' + str(p)])
+            with patch('link_stage.subprocess.check_output', return_value=b'not a linker'):
+                with self.assertRaises(ValueError):
+                    link_stage.linker_options({'linker_path': str(p)})
     @unittest.skipUnless(os.name!='nt' and shutil.which('clang++') and shutil.which('ld.lld'),'Local Linux Clang/LLD required')
     def test_actual_mixed_cache_and_strict_link(self):
         with tempfile.TemporaryDirectory(prefix='forge space ') as d:
@@ -26,7 +40,8 @@ class TargetTests(unittest.TestCase):
             c=dict(source=str(src),output=str(out),ndk=str(ndk),includes=[],workers=4,api=21,opt='1',reserve=2,headroom=.5,stopfile=str(root/'stop'),arch='aarch64',link=True,freestanding=True,link_name='libdemo.so')
             def run():
                 with patch('engine.available_ram',return_value=64*GIB),contextlib.redirect_stdout(io.StringIO()):return engine.run(c,str(out))
-            self.assertEqual(run(),0); old={p.name:(digest(p),p.stat().st_mtime_ns) for p in out.glob('*.o')}; oldstamp=json.loads((out/'stubborn.json').read_text())
+            c['linker_path']=shutil.which('ld.lld')
+            self.assertEqual(run(),0); self.assertIn('LLD',json.loads((out/'link_status.json').read_text())['linker_version']); old={p.name:(digest(p),p.stat().st_mtime_ns) for p in out.glob('*.o')}; oldstamp=json.loads((out/'stubborn.json').read_text())
             c['overrides']={'stubborn.cpp':{'opt':'0','timing':True}};self.assertEqual(run(),0)
             status=json.loads((out/'safe_status.json').read_text());self.assertEqual((status['cached'],status['compiled']),(8,1));self.assertTrue(status['mixed_flags']);self.assertTrue(status['android_link_verified'])
             for p in out.glob('f*.o'):self.assertEqual((digest(p),p.stat().st_mtime_ns),old[p.name])

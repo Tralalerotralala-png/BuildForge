@@ -350,7 +350,7 @@ def run(c, output_arg):
             if c.get('link'):
                 event('phase', message='Strict shared-library link; unresolved symbols fail the link.')
                 try:
-                    link_ok = link_stage.link(c, out, compiler, flags, entries, registry)
+                    link_ok = link_stage.link(c, out, compiler, flags, entries, registry, notify=lambda message: event('phase', message=message))
                 except Exception as e:
                     event('warning', message='Link failed: ' + str(e))
                     atomic_json(out / 'link_status.json', {'success': False, 'error': str(e)})
