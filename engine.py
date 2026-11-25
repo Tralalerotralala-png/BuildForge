@@ -84,6 +84,10 @@ def plan(c):
             raise ValueError(
                 'Duplicate source basenames. Choose a narrower source folder or rename conflicting units in your own project.'
             )
+    # Object stamps and logs share the output directory with session metadata.
+    reserved = {'safe_status', 'object_manifest', 'unit_timings', 'link_status', 'link'}
+    if any(p.stem.casefold() in reserved for p in sources):
+        raise ValueError('Source basename conflicts with reserved BuildForge metadata or log.')
     host = (
         'windows-x86_64'
         if os.name == 'nt'
@@ -143,7 +147,7 @@ def plan(c):
     return sources, out, ndk, compiler, roots, flags, workers, reserve, headroom
 
 
-def compilation_context(ndk, compiler, roots):
+def compilation_context(ndk, compiler, roots, *, generic=False):
     """Use the identical legacy context for compilation and read-only audits."""
     roots = list(roots)
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
@@ -162,7 +166,7 @@ def compilation_context(ndk, compiler, roots):
     base = {
         'compiler_sha256': digest(compiler),
         'version': version.decode(errors='replace'),
-        'headers': header_digest(roots),
+        'headers': header_digest(roots, generic=generic),
     }
     return base, roots
 
@@ -176,7 +180,7 @@ def find_missing_units(c) -> list[str]:
     lock = out / '.compile.lock'
     if lock.exists():
         raise ValueError('Output is locked. Finish the active build before auditing.')
-    base, _ = compilation_context(ndk, compiler, roots)
+    base, _ = compilation_context(ndk, compiler, roots, generic=not c.get('gos', False))
     overrides = overrides_for(sources, c.get('overrides', {}))
     machine = 62 if any(f.startswith('--target=x86_64-') for f in flags) else 183
     missing = []
@@ -225,7 +229,7 @@ def run(c, output_arg):
         for name in ('objects.rsp', 'safe_status.json', 'object_manifest.json', 'link_status.json'):
             (out / name).unlink(missing_ok=True)
         event('phase', message='Checking toolchain and hashing headers; existing cache format preserved.', total=len(sources))
-        base, roots = compilation_context(ndk, compiler, roots)
+        base, roots = compilation_context(ndk, compiler, roots, generic=not c.get('gos', False))
         overrides = overrides_for(sources, c.get('overrides', {}))
         unit_flags = {s.name: flags_for(flags, overrides.get(s.name)) for s in sources}
         contexts = {name: fingerprint(base, f) for name, f in unit_flags.items()}
@@ -410,7 +414,7 @@ def run(c, output_arg):
         link_ok = False
         machine = 62 if c.get('arch') == 'x86_64' else 183
         if complete:
-            if header_digest(roots) != base['headers'] or digest(compiler) != base['compiler_sha256']:
+            if header_digest(roots, generic=not c.get('gos', False)) != base['headers'] or digest(compiler) != base['compiler_sha256']:
                 raise ValueError('Headers or toolchain changed during build; resume to revalidate. No ready manifest published.')
             for src in sources:
                 obj = out / (src.stem + '.o')
