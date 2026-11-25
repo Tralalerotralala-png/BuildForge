@@ -58,7 +58,7 @@ def units(src: Path) -> list[Path]:
     return [found[n] for n in sorted(expected)]
 
 
-def header_digest(roots: list[Path]) -> str:
+def header_digest(roots: list[Path], *, generic: bool = False) -> str:
     h = hashlib.sha256()
     for i, root in enumerate(roots):
         if not root.is_dir():
@@ -66,9 +66,10 @@ def header_digest(roots: list[Path]) -> str:
         # Include extensionless libc++ headers as well as .h/.hpp/.inc files.
         for p in sorted(root.rglob('*')):
             if p.is_file():
-                if root.name not in ('include', 'include-fixed') and p.suffix.lower() not in (
-                    '.h', '.hpp', '.hh', '.inc', '.inl'
-                ):
+                suffixes = ('.h', '.hpp', '.hh', '.inc', '.inl')
+                if generic:
+                    suffixes += ('', '.hxx', '.ipp', '.tpp', '.txx', '.def', '.s', '.asm', '.ixx', '.cuh')
+                if root.name not in ('include', 'include-fixed') and p.suffix.lower() not in suffixes:
                     continue
                 h.update(f'{i}:{p.relative_to(root).as_posix()}\0{digest(p)}\n'.encode())
     return h.hexdigest()
