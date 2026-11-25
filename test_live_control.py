@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import engine
-from cache_compat import GIB, atomic_json, is_elf_object, total_ram
+from cache_compat import GIB, atomic_json, compile_one, is_elf_object, total_ram
 from resource_control import Budget, LiveControl, ProcessRegistry
 
 
@@ -55,6 +55,100 @@ class LiveTests(unittest.TestCase):
             if proc.poll() is None:
                 proc.kill()
                 proc.wait(timeout=5)
+
+    def test_selected_cancel_leaves_other_worker_running(self):
+        reg = ProcessRegistry()
+        cmd = [sys.executable, '-c', 'import time; time.sleep(30)']
+        a = reg.launch('a.cpp', cmd)
+        b = reg.launch('b.cpp', cmd)
+        try:
+            self.assertEqual(reg.cancel_labels({'a.cpp'}), 1)
+            self.assertIsNotNone(a.wait(timeout=5))
+            self.assertIsNone(b.poll())
+            self.assertIsNone(reg.launch('a.cpp', cmd))
+            self.assertFalse(reg.cancelled)
+            self.assertEqual(reg.cancel_labels({'unrelated.cpp'}), 0)
+            self.assertIsNone(b.poll())
+        finally:
+            for p in (a, b):
+                if p.poll() is None:
+                    p.kill()
+                    p.wait(timeout=5)
+
+    def test_selected_cancel_blocks_delayed_unit_only(self):
+        reg = ProcessRegistry()
+        self.assertEqual(reg.cancel_labels({'late.cpp'}), 0)
+        with patch('resource_control.subprocess.Popen') as spawn:
+            self.assertIsNone(reg.launch('late.cpp', ['unused']))
+            spawn.assert_not_called()
+            self.assertIs(reg.launch('other.cpp', ['unused']), spawn.return_value)
+            spawn.assert_called_once()
+
+    def test_cancel_latches_before_worker_spawn(self):
+        reg = ProcessRegistry()
+        self.assertEqual(reg.terminate_all(), 0)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            src = root / 'late.cpp'
+            src.write_text('int late(){return 0;}', encoding='utf-8')
+            with patch('resource_control.subprocess.Popen') as spawn:
+                self.assertEqual(compile_one(src, root, Path('unused'), [], 'context', False, reg),
+                                 ('late.cpp', 'failed'))
+                spawn.assert_not_called()
+            self.assertFalse((root / 'late.o').exists())
+            self.assertFalse((root / 'late.json').exists())
+            self.assertEqual(list(root.glob('*.tmp.o')), [])
+
+    def test_cancel_serializes_with_process_creation(self):
+        reg = ProcessRegistry()
+        started = threading.Event()
+        release = threading.Event()
+        cancelled = threading.Event()
+        created = []
+        errors = []
+        real_popen = subprocess.Popen
+        def delayed_spawn(*args, **kwargs):
+            started.set()
+            if not release.wait(5):
+                raise RuntimeError('test spawn timed out')
+            return real_popen(*args, **kwargs)
+        def launch():
+            try:
+                created.append(reg.launch('unit.cpp', [sys.executable, '-c', 'import time; time.sleep(30)']))
+            except BaseException as e:
+                errors.append(e)
+        def stop():
+            try:
+                reg.terminate_all()
+                cancelled.set()
+            except BaseException as e:
+                errors.append(e)
+        with patch('resource_control.subprocess.Popen', side_effect=delayed_spawn):
+            worker = threading.Thread(target=launch)
+            stopper = threading.Thread(target=stop)
+            worker.start()
+            try:
+                self.assertTrue(started.wait(5))
+                stopper.start()
+                self.assertFalse(cancelled.wait(0.1))
+                release.set()
+                worker.join(8)
+                stopper.join(15)
+                self.assertFalse(worker.is_alive())
+                self.assertFalse(stopper.is_alive())
+                self.assertEqual(errors, [])
+                self.assertTrue(cancelled.is_set())
+                self.assertEqual(len(created), 1)
+                self.assertIsNotNone(created[0].wait(timeout=5))
+            finally:
+                release.set()
+                worker.join(8)
+                if stopper.ident is not None:
+                    stopper.join(15)
+                for proc in created:
+                    if proc.poll() is None:
+                        proc.kill()
+                        proc.wait(timeout=5)
 
     @unittest.skipUnless(os.name != 'nt' and shutil.which('clang++'), 'requires local Linux Clang')
     def test_live_scheduler_real_compiler(self):
