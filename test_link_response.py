@@ -41,9 +41,12 @@ class LinkResponseTests(unittest.TestCase):
             c = dict(source=str(src), output=str(out), ndk=str(ndk), includes=[],
                      workers=1, api=21, opt='1', reserve=2, headroom=.5,
                      stopfile=str(root / 'stop'), arch='aarch64', link=True,
-                     freestanding=True, link_name='libdemo.so')
+                     freestanding=True, link_name='libdemo.so',
+                     linker_path=shutil.which('ld.lld'))
             with patch('engine.available_ram', return_value=64 * GIB), contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(engine.run(c, str(out)), 0)
+                self.assertEqual(engine.run(c, str(out)), 0,
+                                 (out / 'link.log').read_text(errors='replace')
+                                 if (out / 'link.log').exists() else 'No linker log')
                 previous = digest(out / 'libdemo.so')
                 real_link = link_stage.link
 
@@ -57,7 +60,9 @@ class LinkResponseTests(unittest.TestCase):
                 status = json.loads((out / 'link_status.json').read_text())
                 self.assertFalse(status['success'])
                 self.assertIn('differs from the validated manifest', status['error'])
-                self.assertEqual(engine.run(c, str(out)), 0)
+                self.assertEqual(engine.run(c, str(out)), 0,
+                                 (out / 'link.log').read_text(errors='replace')
+                                 if (out / 'link.log').exists() else 'No linker log')
                 self.assertEqual(list(out.glob('*.tmp.rsp')), [])
 
 
