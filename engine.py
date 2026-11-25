@@ -132,6 +132,8 @@ def plan(c):
         flags.append('-D' + d)
     overrides_for(sources, c.get('overrides', {}))
     link_stage.validate_config(c)
+    if type(c.get('retry_slow_targets', False)) is not bool:
+        raise ValueError('Retry slow targets must be boolean.')
     threshold = int(c.get('slow_seconds', 900))
     if not 1 <= threshold <= 86400:
         raise ValueError('Slow-file threshold must be 1–86400 seconds.')
@@ -242,6 +244,9 @@ def run(c, output_arg):
         registry = ProcessRegistry()
         requested_units = set()
         source_names = {s.name for s in sources}
+        sources_by_name = {s.name: s for s in sources}
+        retried = {}
+        first_attempts = {}
 
         def check_unit_cancellations():
             if unit_cancel_file is None or cancelled:
@@ -324,9 +329,33 @@ def run(c, output_arg):
                     done, running = cf.wait(running, timeout=0.5, return_when=cf.FIRST_COMPLETED)
                     for f in done:
                         name, state = f.result()
-                        results[name] = state
                         elapsed = round(time.monotonic() - submitted.pop(f), 3)
+                        # Opt-in, bounded retry after a failed slow attempt, only for
+                        # explicitly targeted units. Never interrupt a live compiler.
+                        if (state == 'failed' and c.get('retry_slow_targets', False)
+                                and name in overrides and name not in retried
+                                and name not in requested_units and not stopped and not cancelled
+                                and not stopfile.exists()
+                                and not (cancelfile and cancelfile.exists())
+                                and elapsed >= threshold
+                                and any(x in ('-O1', '-O2') for x in unit_flags[name])):
+                            log = out / (Path(name).stem + '.log')
+                            first_attempts[name] = {
+                                'state': state, 'seconds': elapsed,
+                                'log_tail': _read_log_tail(log),
+                            }
+                            override = {'opt': '0', 'timing': True}
+                            overrides[name] = override
+                            retried[name] = override
+                            unit_flags[name] = flags_for(flags, override)
+                            contexts[name] = fingerprint(base, unit_flags[name])
+                            q.appendleft(sources_by_name[name])
+                            event('warning', message=f'Slow target {name} failed; retrying once at O0 with timing. Other units unchanged.')
+                            continue
+                        results[name] = state
                         timings[name] = {'state': state, 'seconds': elapsed, 'cancel_requested': name in requested_units}
+                        if name in first_attempts:
+                            timings[name]['first_attempt'] = first_attempts[name]
                         extra = {}
                         if state == 'failed':
                             tail = _read_log_tail(out / (Path(name).stem + '.log'))
@@ -431,6 +460,7 @@ def run(c, output_arg):
             'stopped': (stopped or cancelled) and not complete,
             'cancelled': cancelled and not complete,
             'selected_cancel_requests': sorted(requested_units),
+            'retry_overrides': retried,
             'mixed_flags': any(unit_flags[n] != flags for n in unit_flags),
             'link_requested': bool(c.get('link')),
         }
