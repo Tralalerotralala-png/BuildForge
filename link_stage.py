@@ -141,6 +141,10 @@ def link(c, out, compiler, flags, entries, registry=None, notify=None):
             or stamp.get('object_sha256') != e['object_sha256']
         ):
             raise ValueError('Object changed before link: ' + p.name)
+    libraries = [Path(s).resolve(strict=True) for s in c.get('link_libraries', [])]
+    if any(p == target.resolve() for p in libraries):
+        raise ValueError('Link output cannot also be an input library.')
+    library_hashes = {p: digest(p) for p in libraries}
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
     cancel = Path(c['cancelfile']) if c.get('cancelfile') else None
     linker_flags, linker_version = linker_options(c, creationflags)
@@ -161,7 +165,7 @@ def link(c, out, compiler, flags, entries, registry=None, notify=None):
         args.append('-nostdlib')
     args += [
         '@' + str(response),
-        *[str(Path(s).resolve()) for s in c.get('link_libraries', [])],
+        *[str(p) for p in libraries],
         *['-l' + s for s in c.get('link_system_libs', [])],
         '-o',
         str(tmp),
@@ -211,6 +215,14 @@ def link(c, out, compiler, flags, entries, registry=None, notify=None):
         valid = is_shared_elf(tmp, machine)
         ok = code == 0 and valid and not cancelled
         if ok:
+            # Do not publish a successful link if an explicit input changed.
+            for e in entries:
+                p = out / e['object']
+                if digest(p) != e['object_sha256']:
+                    raise ValueError('Object changed during link: ' + p.name)
+            for p, sha in library_hashes.items():
+                if digest(p) != sha:
+                    raise ValueError('External library changed during link: ' + p.name)
             _replace_with_retry(tmp, target)
         atomic_json(
             out / 'link_status.json',
@@ -220,6 +232,7 @@ def link(c, out, compiler, flags, entries, registry=None, notify=None):
                 'cancelled': cancelled,
                 'elapsed_seconds': round(time.monotonic() - start, 3),
                 'linker_version': linker_version,
+                'explicit_library_sha256': {str(p): sha for p, sha in library_hashes.items()},
                 'artifact': target.name if ok else None,
                 'sha256': digest(target) if ok else None,
                 'device_execution_verified': False,
