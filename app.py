@@ -431,6 +431,9 @@ class App:
         e = ttk.Entry(lk, textvariable=self.v['linker_path'])
         e.pack(fill='x')
         self.inputs.append(e)
+        probe = ttk.Button(lk, text='Test compiler / linker compatibility', command=self.probe_linker)
+        probe.pack(anchor='w', pady=6)
+        self.inputs.append(probe)
         ttk.Label(lk, text='Additional archive/shared library paths (one per line)').pack(anchor='w', pady=(10, 0))
         self.link_libs = tk.Text(lk, height=4, wrap='none')
         self.link_libs.pack(fill='x')
@@ -817,6 +820,29 @@ class App:
         except Exception as e:
             messagebox.showerror('Log analysis failed', str(e))
 
+    def probe_linker(self):
+        if self.proc or self.busy:
+            return
+        try:
+            c = dict(ndk=self.v['ndk'].get().strip(),
+                     linker_path=self.v['linker_path'].get().strip(),
+                     api=self.v['api'].get(),
+                     arch='x86_64' if 'x86-64' in self.mode.get() else 'aarch64')
+        except (ValueError, tk.TclError) as e:
+            messagebox.showerror('Invalid toolchain', str(e))
+            return
+        self.set_busy(True)
+        self.status.set('Testing compiler and linker with disposable synthetic code…')
+
+        def task():
+            try:
+                from link_stage import probe_toolchain
+                self.q.put(('link_probe', probe_toolchain(c)))
+            except Exception as e:
+                self.q.put(('link_probe_error', str(e)))
+
+        threading.Thread(target=task, daemon=True).start()
+
     def find_missing(self):
         if self.proc or self.busy:
             return
@@ -952,7 +978,18 @@ class App:
         try:
             for _ in range(100):
                 kind, v = self.q.get_nowait()
-                if kind == 'cache_audit':
+                if kind == 'link_probe':
+                    self.set_busy(False)
+                    self.status.set('Synthetic toolchain compatibility check passed.')
+                    messagebox.showinfo('Toolchain probe passed',
+                        f"{v['arch']} / API {v['api']} — {v['linker_version']}\n"
+                        f"Elapsed: {v['elapsed_seconds']} s\n\n"
+                        "Freestanding synthetic check only. Project libraries and device execution are not verified.")
+                elif kind == 'link_probe_error':
+                    self.set_busy(False)
+                    self.status.set('Toolchain probe failed; selected tools were not changed.')
+                    messagebox.showerror('Toolchain probe failed', v)
+                elif kind == 'cache_audit':
                     self.show_cache_audit(v)
                 elif kind == 'cache_audit_error':
                     self.set_busy(False)
