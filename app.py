@@ -896,8 +896,9 @@ class App:
         self.root.after(1500, self.monitor)
 
     def tick(self):
+        # Yield to Tk even when the engine produces events faster than we render.
         try:
-            while True:
+            for _ in range(100):
                 kind, v = self.q.get_nowait()
                 if kind == 'scan':
                     self.set_busy(False)
@@ -940,7 +941,7 @@ class App:
                     elif ev == 'progress':
                         self.progress.set(100 * v['done'] / max(1, v['total']))
                         self.summary.set(
-                            f'{v["done"]}/{v["total"]} processed  |  {v["compiled"]} new  |  '
+                            f'{v["done"]}/{v["total"]} processed  |  {max(0, v["total"] - v["done"])} remaining  |  {v["compiled"]} new  |  '
                             f'{v["cached"]} cached  |  {v["failed"]} failed  |  {v["active"]} active'
                         )
                         self.effective.set(
@@ -1004,7 +1005,7 @@ class App:
                         return
         except queue.Empty:
             pass
-        self.root.after(150, self.tick)
+        self.root.after(150 if self.q.empty() else 1, self.tick)
 
     def on_close(self):
         if self.busy:
