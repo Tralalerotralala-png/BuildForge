@@ -69,6 +69,7 @@ def defaults():
         track_dependencies=False,
         link=False,
         link_name='liboutput.so',
+        link_page_size=4096,
         linker_path='',
         link_system_libs=[],
         link_libraries=[],
@@ -431,6 +432,11 @@ class App:
         e = ttk.Entry(lk, textvariable=self.v['link_name'])
         e.pack(fill='x')
         self.inputs.append(e)
+        self.v['link_page_size'] = tk.IntVar(value=4096)
+        ttk.Label(lk, text='Required ELF load page size (bytes)').pack(anchor='w', pady=(8, 0))
+        page = ttk.Combobox(lk, textvariable=self.v['link_page_size'], values=(4096, 16384), state='readonly')
+        page.pack(anchor='w')
+        self.inputs.append(page)
         self.v['linker_path'] = tk.StringVar(value='')
         ttk.Label(lk, text='Optional external ld.lld executable (absolute path; blank = NDK default)').pack(anchor='w', pady=(8, 0))
         e = ttk.Entry(lk, textvariable=self.v['linker_path'])
@@ -492,6 +498,7 @@ class App:
             track_dependencies=self.v['track_dependencies'].get(),
             link=self.v['link'].get(),
             link_name=self.v['link_name'].get(),
+            link_page_size=self.v['link_page_size'].get(),
             linker_path=self.v['linker_path'].get().strip(),
             freestanding=self.v['freestanding'].get(),
             link_libraries=[x.strip() for x in self.link_libs.get('1.0', 'end').splitlines() if x.strip()],
@@ -832,6 +839,7 @@ class App:
         try:
             c = dict(ndk=self.v['ndk'].get().strip(),
                      linker_path=self.v['linker_path'].get().strip(),
+                     link_page_size=self.v['link_page_size'].get(),
                      api=self.v['api'].get(),
                      arch='x86_64' if 'x86-64' in self.mode.get() else 'aarch64')
         except (ValueError, tk.TclError) as e:
@@ -989,6 +997,7 @@ class App:
                     self.status.set('Synthetic toolchain compatibility check passed.')
                     messagebox.showinfo('Toolchain probe passed',
                         f"{v['arch']} / API {v['api']} — {v['linker_version']}\n"
+                        f"ELF page sizes (bytes): {v['elf_compatible_page_sizes']}\n"
                         f"Elapsed: {v['elapsed_seconds']} s\n\n"
                         "Freestanding synthetic check only. Project libraries and device execution are not verified.")
                 elif kind == 'link_probe_error':
