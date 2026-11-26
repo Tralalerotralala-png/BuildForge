@@ -1,7 +1,9 @@
 import json
+from collections import Counter
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 from tools.package_candidate import bundle, sha256, zip_portable
@@ -37,3 +39,37 @@ class CandidatePackageTests(unittest.TestCase):
                 self.assertEqual(value, sha256(out / name))
             with self.assertRaises(FileExistsError):
                 bundle(portable, installer, out)
+
+    def test_artifacts_hashed_once_and_worker_modes_match(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            portable = root / 'portable'
+            portable.mkdir()
+            (portable / 'BuildForge.exe').write_bytes(b'portable' * 65536)
+            (portable / 'build-metadata.json').write_text('{"status":"candidate"}')
+            installer = root / 'installer'
+            installer.mkdir()
+            (installer / 'BuildForge-test-Setup.exe').write_bytes(b'installer' * 65536)
+            expected = Counter({'BuildForge-test-Windows-portable.zip': 1,
+                                'BuildForge-test-Setup.exe': 1,
+                                'build-metadata.json': 1})
+            outputs = []
+            for workers in (1, 2):
+                out = root / f'candidate-{workers}'
+                with patch('tools.package_candidate.sha256', wraps=sha256) as observed:
+                    bundle(portable, installer, out, hash_workers=workers)
+                self.assertEqual(Counter(c.args[0].name for c in observed.call_args_list), expected)
+                for line in (out / 'SHA256SUMS.txt').read_text().splitlines():
+                    digest, name = line.split('  ', 1)
+                    self.assertEqual(digest, sha256(out / name))
+                outputs.append((out / 'SHA256SUMS.txt').read_bytes())
+            self.assertEqual(outputs[0], outputs[1])
+
+    def test_invalid_worker_count_rejected_before_output(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            out = root / 'candidate'
+            for workers in (0, 3, -1, True, 1.0):
+                with self.subTest(workers=workers), self.assertRaisesRegex(ValueError, 'Hash workers'):
+                    bundle(root / 'portable', root / 'installer', out, hash_workers=workers)
+                self.assertFalse(out.exists())
