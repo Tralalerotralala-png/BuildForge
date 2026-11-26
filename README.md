@@ -21,4 +21,9 @@ Run `python -m unittest discover -v` (Linux integration tests require Clang and 
 
 Supports Android AArch64/x86-64 ELF, C17/C++17, explicit include roots and defines. Keep inputs stable during a build; never run two engines against one output directory. Mixed optimization requires ABI/runtime validation. Native COFF/MSVC, general dependency graphs, CMake/Ninja import, polished accessibility and clean-machine installer/device validation remain open. See [release gate #9](https://github.com/Tralalerotralala-png/BuildForge/issues/9). Do not bypass output locks or fingerprint checks. Never commit private source, build products, personal profiles or logs.
 
+
+### Strict dependency fingerprints
+
+For generic Android profiles, enable **Strict dependency fingerprints** to hash compiler-discovered include dependencies, including headers outside declared roots. Existing cache entries without dependency data rebuild once. The mode may be slower even on cache hits; keep inputs stable. Legacy fixed-count profiles retain their existing stamp format.
+
 MIT license; third-party components retain their licenses. Design references: [Ninja](https://ninja-build.org/manual.html), [CMake](https://cmake.org/cmake/help/latest/prop_gbl/JOB_POOLS.html), [ccache](https://ccache.dev/), [sccache](https://github.com/mozilla/sccache), [psutil](https://psutil.readthedocs.io/).

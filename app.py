@@ -66,6 +66,7 @@ def defaults():
         overrides={},
         slow_seconds=900,
         retry_slow_targets=False,
+        track_dependencies=False,
         link=False,
         link_name='liboutput.so',
         linker_path='',
@@ -407,6 +408,10 @@ class App:
         retry = ttk.Checkbutton(target, text='Retry explicitly targeted slow failures once at O0 (opt-in)', variable=self.v['retry_slow_targets'])
         retry.pack(anchor='w', pady=4)
         self.inputs.append(retry)
+        self.v['track_dependencies'] = tk.BooleanVar(value=False)
+        deps = ttk.Checkbutton(target, text='Strict dependency fingerprints (generic only; extra preprocessing)', variable=self.v['track_dependencies'])
+        deps.pack(anchor='w', pady=4)
+        self.inputs.append(deps)
         ttk.Label(
             target,
             text='A slow warning is not a hang diagnosis. Timing reports are written to per-file logs only when Clang exits. '
@@ -484,6 +489,7 @@ class App:
             overrides=parse_overrides(self.overrides.get('1.0', 'end')),
             slow_seconds=self.v['slow_seconds'].get(),
             retry_slow_targets=self.v['retry_slow_targets'].get(),
+            track_dependencies=self.v['track_dependencies'].get(),
             link=self.v['link'].get(),
             link_name=self.v['link_name'].get(),
             linker_path=self.v['linker_path'].get().strip(),
