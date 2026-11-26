@@ -29,6 +29,10 @@ _MAX_MANIFEST = 1024 * 1024
 
 
 def _identity(s):
+    if os.name == "nt":
+        # On Python 3.12+ Windows, lstat reports ChangeTime in st_ctime_ns while
+        # fstat reports CreationTime; st_birthtime_ns matches across both calls.
+        return s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, getattr(s, "st_birthtime_ns", s.st_ctime_ns)
     return s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns
 
 

@@ -13,6 +13,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from cache_compat import GIB, atomic_json, available_ram
+from pipeline import detect_ndk_paths, detect_toolchains
 from recovery import inventory, recover
 from resource_control import hardware
 from targeting import format_overrides, parse_overrides
@@ -22,29 +23,8 @@ BASE = Path(__file__).resolve().parent
 
 
 def discover_ndk():
-    candidates = []
-    for key in ('ANDROID_NDK_HOME', 'ANDROID_NDK_ROOT', 'NDK_HOME'):
-        if os.environ.get(key):
-            candidates.append(Path(os.environ[key]))
-    sdk = Path(
-        os.environ.get('ANDROID_SDK_ROOT')
-        or os.environ.get('ANDROID_HOME')
-        or Path.home() / 'AppData' / 'Local' / 'Android' / 'Sdk'
-    )
-    if (sdk / 'ndk').is_dir():
-        candidates.extend(sorted((sdk / 'ndk').iterdir(), reverse=True))
-    candidates.append(sdk / 'ndk-bundle')
-    for pf in {os.environ.get('ProgramFiles', r'C:\Program Files'), os.environ.get('ProgramFiles(x86)', '')}:
-        if not pf:
-            continue
-        hub = Path(pf) / 'Unity' / 'Hub' / 'Editor'
-        if hub.is_dir():
-            for ed in sorted(hub.iterdir(), reverse=True):
-                candidates.append(ed / 'Editor' / 'Data' / 'PlaybackEngines' / 'AndroidPlayer' / 'NDK')
-    for p in candidates:
-        if (p / 'toolchains' / 'llvm' / 'prebuilt').is_dir():
-            return str(p)
-    return ''
+    ndks = detect_ndk_paths()
+    return str(ndks[0]) if ndks else ''
 
 
 def defaults():
@@ -1170,6 +1150,9 @@ def gui_smoke_test():
 if __name__ == '__main__':
     if sys.argv[1:] == ['--gui-smoke-test']:
         raise SystemExit(gui_smoke_test())
+    if sys.argv[1:] == ['--toolchains']:
+        print(json.dumps(detect_toolchains(), indent=2))
+        raise SystemExit(0)
     if '--engine' in sys.argv:
         sys.argv.remove('--engine')
         from engine import main

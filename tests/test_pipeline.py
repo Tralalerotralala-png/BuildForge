@@ -1,0 +1,163 @@
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import threading
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from pipeline import (
+    PipelineRunner,
+    PipelineStage,
+    WorkItem,
+    detect_ndk_paths,
+    detect_toolchains,
+    extract_compiler_diagnostics,
+    verify_android_apk_elfs,
+)
+
+
+class PipelineTests(unittest.TestCase):
+    def test_detect_toolchains_and_diagnostics(self):
+        info = detect_toolchains()
+        self.assertIn("hardware", info)
+        self.assertIn("tools", info)
+        self.assertIsInstance(detect_ndk_paths(), list)
+        log = (
+            "src/foo.cpp:12:5: error: 'bar' was not declared in this scope\n"
+            "src/foo.cpp:2:10: fatal error: 'missing.h' file not found\n"
+            "ld.lld: error: undefined symbol: MissingNativeFn\n"
+            "warning: PT_LOAD segment not aligned for 16384\n"
+        )
+        diag = extract_compiler_diagnostics(log)
+        self.assertEqual(diag["error_count"], 2)
+        self.assertEqual(diag["undefined_symbols"], ["MissingNativeFn"])
+        self.assertGreaterEqual(len(diag["hints"]), 3)
+
+    def test_resumable_pipeline_reuses_cache_and_recovers_interrupted_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            src_dir = root / "src"
+            out_dir = root / "out"
+            src_dir.mkdir()
+            f1 = src_dir / "a.txt"
+            f2 = src_dir / "b.txt"
+            f1.write_text("alpha", encoding="utf-8")
+            f2.write_text("beta", encoding="utf-8")
+            calls = []
+
+            def transform(item: WorkItem):
+                calls.append(item.item_id)
+                item.outputs[0].parent.mkdir(parents=True, exist_ok=True)
+                data = item.inputs[0].read_text(encoding="utf-8").upper()
+                item.outputs[0].write_text(data + "|" + item.params.get("tag", "v1"), encoding="utf-8")
+
+            def fail_once(item: WorkItem):
+                calls.append(item.item_id)
+                if not item.params.get("fixed"):
+                    raise RuntimeError("Simulated mid-stage interruption")
+                item.outputs[0].write_text("packed", encoding="utf-8")
+
+            o1, o2 = out_dir / "a.out", out_dir / "b.out"
+            pkg_out = out_dir / "pkg.bin"
+            runner = PipelineRunner(out_dir, pipeline_name="test-app")
+
+            # Run 1: stage 1 completes, stage 2 fails.
+            stages_run1 = [
+                PipelineStage(
+                    "transform",
+                    [
+                        WorkItem("a", [f1], [o1], transform, {"tag": "v1"}),
+                        WorkItem("b", [f2], [o2], transform, {"tag": "v1"}),
+                    ],
+                ),
+                PipelineStage(
+                    "package",
+                    [WorkItem("pkg", [o1, o2], [pkg_out], fail_once, {"fixed": False})],
+                    parallel=False,
+                ),
+            ]
+            r1 = runner.run(stages_run1)
+            self.assertFalse(r1["success"])
+            self.assertEqual(set(calls), {"a", "b", "pkg"})
+
+            # Run 2 (resume after fixing stage 2): stage 1 must hit cache (0 executions).
+            calls.clear()
+            stages_run2 = [
+                stages_run1[0],
+                PipelineStage(
+                    "package",
+                    [WorkItem("pkg", [o1, o2], [pkg_out], fail_once, {"fixed": True})],
+                    parallel=False,
+                ),
+            ]
+            r2 = runner.run(stages_run2)
+            self.assertTrue(r2["success"])
+            self.assertEqual(calls, ["pkg"])
+            self.assertEqual(r2["stages"][0]["cached"], 2)
+            self.assertEqual(r2["stages"][0]["executed"], 0)
+            self.assertIn("bottleneck_stage", r2)
+
+            # Run 3: modify f1 -> only item 'a' and downstream 'pkg' re-execute; 'b' stays cached.
+            calls.clear()
+            f1.write_text("alpha-2", encoding="utf-8")
+            r3 = runner.run(stages_run2)
+            self.assertTrue(r3["success"])
+            self.assertEqual(calls, ["a", "pkg"])
+            self.assertEqual(r3["stages"][0]["cached"], 1)
+            self.assertEqual(r3["stages"][0]["executed"], 1)
+
+    def test_pipeline_stop_event_and_git_checkout_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            git_dir = root / "repo"
+            (git_dir / ".git").mkdir(parents=True)
+            with self.assertRaises(ValueError):
+                PipelineRunner(git_dir / "out")
+
+            stop = threading.Event()
+            stop.set()
+            src = root / "in.txt"
+            src.write_text("x", encoding="utf-8")
+            runner = PipelineRunner(root / "out")
+            res = runner.run(
+                [PipelineStage("s1", [WorkItem("x", [src], [root / "out/x"], lambda _: None)])],
+                stop_event=stop,
+            )
+            self.assertFalse(res["success"])
+            self.assertTrue(res["interrupted"])
+
+    @unittest.skipUnless(shutil.which("clang") and shutil.which("ld.lld"), "Clang/LLD required")
+    def test_verify_android_apk_elfs_real_binary(self):
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            src, lib4, lib16 = root / "x.c", root / "lib4.so", root / "lib16.so"
+            src.write_text("int f(void) { return 7; }\n", encoding="utf-8")
+            for page, out in ((4096, lib4), (16384, lib16)):
+                subprocess.run(
+                    [
+                        "clang", "--target=aarch64-linux-android21", "-fuse-ld=lld",
+                        "-shared", "-nostdlib", "-fPIC", f"-Wl,-z,max-page-size={page}",
+                        str(src), "-o", str(out),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    timeout=30,
+                )
+            apk = root / "test.apk"
+            with zipfile.ZipFile(apk, "w") as zf:
+                zf.write(lib4, "lib/arm64-v8a/libfour.so")
+                zf.write(lib16, "lib/arm64-v8a/libsixteen.so")
+            audit4 = verify_android_apk_elfs(apk, required_page_size=4096)
+            self.assertTrue(audit4["compatible"])
+            audit16 = verify_android_apk_elfs(apk, required_page_size=16384)
+            self.assertFalse(audit16["compatible"])
+            self.assertEqual(audit16["offending"], ["libfour.so"])
+
+
+if __name__ == "__main__":
+    unittest.main()
