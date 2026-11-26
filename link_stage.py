@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from cache_compat import _replace_with_retry, atomic_json, digest, is_elf_object
+from elf_compat import compatible_page_sizes, page_size_flags, required_page_size
 
 
 def response_text(out, names):
@@ -33,6 +34,7 @@ def validate_config(c):
     if type(c.get('freestanding', False)) is not bool:
         raise ValueError('Invalid freestanding setting.')
     selected_linker(c)
+    required_page_size(c)
     for s in c.get('link_system_libs', []):
         if not re.fullmatch(r'[A-Za-z0-9_+.-]+', s) or s.startswith('-'):
             raise ValueError('Invalid system library name.')
@@ -85,6 +87,7 @@ def probe_toolchain(c):
         raise ValueError('NDK compiler/sysroot not found.')
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
     linker_flags, version = linker_options(c, creationflags)
+    page_size = required_page_size(c)
     common = [str(compiler), f'--target={arch}-linux-android{api}', f'--sysroot={sysroot}']
     start = time.monotonic()
     with tempfile.TemporaryDirectory(prefix='buildforge-link-probe-') as d:
@@ -94,7 +97,7 @@ def probe_toolchain(c):
         machine = 62 if arch == 'x86_64' else 183
         for stage, args in [
             ('compile', common + ['-x', 'c', '-fPIC', '-c', str(source), '-o', str(obj)]),
-            ('link', common + linker_flags + ['-shared', '-nostdlib', '-Wl,--no-undefined',
+            ('link', common + linker_flags + page_size_flags(c) + ['-shared', '-nostdlib', '-Wl,--no-undefined',
                                               str(obj), '-o', str(shared)]),
         ]:
             try:
@@ -106,21 +109,19 @@ def probe_toolchain(c):
                 raise ValueError(f'Synthetic {stage} probe failed (exit {result.returncode}): {diagnostic}')
             if stage == 'compile' and not is_elf_object(obj, machine):
                 raise ValueError('Synthetic compile produced an invalid target object.')
-        if not is_shared_elf(shared, machine):
-            raise ValueError('Synthetic linker output is not the expected Android ELF shared library.')
+        pages = compatible_page_sizes(shared, machine)
+        if page_size not in pages:
+            raise ValueError(f'Synthetic link lacks required {page_size}-byte PT_LOAD alignment.')
     return {'success': True, 'arch': arch, 'api': api, 'linker_version': version,
             'elapsed_seconds': round(time.monotonic() - start, 3),
+            'required_page_size': page_size, 'elf_compatible_page_sizes': pages,
             'scope': 'synthetic freestanding compile/link only'}
 
 
 def is_shared_elf(path, machine):
     try:
-        with path.open('rb') as f:
-            b = f.read(64)
-        return (len(b) == 64 and b[:6] == b'\x7fELF\x02\x01'
-                and int.from_bytes(b[16:18], 'little') == 3
-                and int.from_bytes(b[18:20], 'little') == machine)
-    except OSError:
+        return 4096 in compatible_page_sizes(path, machine)
+    except (OSError, ValueError):
         return False
 
 
@@ -148,6 +149,7 @@ def link(c, out, compiler, flags, entries, registry=None, notify=None):
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
     cancel = Path(c['cancelfile']) if c.get('cancelfile') else None
     linker_flags, linker_version = linker_options(c, creationflags)
+    page_size = required_page_size(c)
     fd, name = tempfile.mkstemp(dir=out, suffix='.tmp.so')
     os.close(fd)
     tmp = Path(name)
@@ -157,6 +159,7 @@ def link(c, out, compiler, flags, entries, registry=None, notify=None):
         str(compiler),
         *[f for f in flags if f.startswith(('--target=', '--sysroot=', '-stdlib='))],
         *linker_flags,
+        *page_size_flags(c),
         '-shared',
         '-Wl,--no-undefined',
         '-Wl,-soname,' + target.name,
@@ -212,8 +215,18 @@ def link(c, out, compiler, flags, entries, registry=None, notify=None):
                 finally:
                     if registry:
                         registry.remove(p)
-        valid = is_shared_elf(tmp, machine)
-        ok = code == 0 and valid and not cancelled
+        pages = []
+        audit_error = None
+        if code == 0 and not cancelled:
+            try:
+                pages = compatible_page_sizes(tmp, machine)
+                if page_size not in pages:
+                    raise ValueError(f'Link output lacks required {page_size}-byte PT_LOAD alignment.')
+            except (OSError, ValueError) as exc:
+                audit_error = str(exc)
+                if notify:
+                    notify(audit_error)
+        ok = code == 0 and not cancelled and audit_error is None and page_size in pages
         if ok:
             # Do not publish a successful link if an explicit input changed.
             for e in entries:
@@ -232,6 +245,9 @@ def link(c, out, compiler, flags, entries, registry=None, notify=None):
                 'cancelled': cancelled,
                 'elapsed_seconds': round(time.monotonic() - start, 3),
                 'linker_version': linker_version,
+                'required_page_size': page_size,
+                'elf_compatible_page_sizes': pages,
+                'error': audit_error,
                 'explicit_library_sha256': {str(p): sha for p, sha in library_hashes.items()},
                 'artifact': target.name if ok else None,
                 'sha256': digest(target) if ok else None,
