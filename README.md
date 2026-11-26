@@ -26,4 +26,9 @@ Supports Android AArch64/x86-64 ELF, C17/C++17, explicit include roots and defin
 
 For generic Android profiles, enable **Strict dependency fingerprints** to hash compiler-discovered include dependencies, including headers outside declared roots. Existing cache entries without dependency data rebuild once. The mode may be slower even on cache hits; keep inputs stable. Legacy fixed-count profiles retain their existing stamp format.
 
+
+### Candidate packaging
+
+CI uses pinned `requirements-build.txt` dependencies and produces a portable ZIP, installer, checksums and build metadata. Archive normalization does not guarantee identical frozen binaries across runner images. Candidates remain unsigned unless separately verified; see [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
+
 MIT license; third-party components retain their licenses. Design references: [Ninja](https://ninja-build.org/manual.html), [CMake](https://cmake.org/cmake/help/latest/prop_gbl/JOB_POOLS.html), [ccache](https://ccache.dev/), [sccache](https://github.com/mozilla/sccache), [psutil](https://psutil.readthedocs.io/).

@@ -18,3 +18,5 @@ safe_status.json
 object_manifest.json
 unit_timings.json
 link_status.json
+
+release-candidate/
