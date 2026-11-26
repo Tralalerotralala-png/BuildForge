@@ -4,7 +4,7 @@ from pathlib import Path
 
 class ReleaseMetadataTests(unittest.TestCase):
     def test_candidate_version_consistent(self):
-        root = Path(__file__).resolve().parent
+        root = Path(__file__).resolve().parents[1]
         readme = (root / 'README.md').read_text(encoding='utf-8')
         version = readme.splitlines()[0].split()[2]
         self.assertEqual(version, '0.7.0-rc.1')

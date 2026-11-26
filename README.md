@@ -1,77 +1,24 @@
-# BuildForge 0.7.0-rc.1 — local C++ build & targeted retry workbench
+# BuildForge 0.7.0-rc.1 — C/C++ build workbench
 
-Local, resumable C/C++ object compilation and optional strict Android ELF shared-library linking. 0.7 integration candidate, not a certified production release. Linux/Windows source checks and portable Windows packaging are validated by CI; native Windows NDK, installer and device tests remain release gates (see [ROADMAP.md](ROADMAP.md)).
+Local, resumable C/C++ compilation and strict optional Android ELF shared-library linking. Integration candidate, not a certified production release. No telemetry upload or bundled proprietary source.
 
-## Start on Windows
+## Quick start
 
-Extract to a **new folder**, then run `OPEN_BUILDFORGE.cmd` using Python 3.9+ with Tkinter. An existing Android NDK (including Unity Hub Editor AndroidPlayer NDK installations) is auto-discovered when available. Optional `psutil` enables richer hardware/worker telemetry and full process-tree Windows priority controls; stdlib fallbacks provide total RAM detection and root-process Windows priority control when `psutil` is absent. No cloud service or telemetry upload. Use saved profiles or import a previous job JSON from the local `BuildForgeARM64/jobs` directory. Do not start a second engine against any active output directory.
+On Windows, extract to a fresh folder and run `OPEN_BUILDFORGE.cmd` with Python 3.9+ and Tkinter. Select an installed Android NDK (Unity Hub NDK discovery is supported), source folder and a separate private output folder. Optional `psutil` enables richer resource telemetry and process-tree priority control.
 
-## What's new in 0.7 candidate
+- Start or resume a build; cached objects are validated by source, object and toolchain fingerprints.
+- Target & diagnose: enter exact filenames with ` | 0`, ` | 1`, ` | 2`, or ` | same | timing` to override optimization or request a compiler timing report. Cache auditing is read-only; targeted slow failures can optionally retry once at O0.
+- Use the resource slider to drain or admit workers, not as a precise CPU quota. Session and selected-unit cancellation affect only owned compiler processes.
+- Link optionally checks object manifests, ELF type and architecture, uses strict undefined-symbol validation, and publishes output atomically. An old library is not proof of a fresh successful link. An optional external LLD must be explicitly selected; test compatibility using the disposable toolchain probe.
 
-- Opt-in, one-time O0 retry of explicitly targeted slow failures with recorded effective fingerprints.
-- Isolated compiler/linker compatibility probe for synthetic Android AArch64 and x86-64 ELF output.
-- Includes 0.6 dashboard, cache-audit, external LLD and selective cancellation improvements.
+Try `examples/synthetic` with ARM64, O1 and a separate empty output folder. Resume with `example.cpp | 0 | timing` to exercise targeted caching. Freestanding linking is for self-contained synthetic examples only.
 
-## What's new in 0.5 beta
+## Build and test
 
-- **Safe owned-process cancellation**: **Cancel active jobs…** in the UI triggers a session cancel token that terminates only compiler process trees spawned by that engine instance, cleanly releasing `.compile.lock` and preserving already-completed cached objects.
-- **Slow-then-failed diagnostics**: `Analyze session log…` now retains slow unit candidates even when active workers later exit as `failed` or are interrupted, across both `0.4+` named logs and legacy exhausted-tail logs.
-- **Missing / failed unit finder**: **Audit cache fingerprints** in **Target & diagnose** scans the selected output directory and checks full source, object and context fingerprints without altering overrides.
-- **Windows hardening**: `CREATE_NO_WINDOW` on Windows compiler/linker subprocesses, transient `PermissionError` retry on atomic object/JSON replacement, null-safe `CreationDate` handling and `ld.lld` recognition in `recovery.py`, and Unity Hub NDK auto-discovery.
-- **UI polish**: Last-used profile persistence (`state.json`), profile deletion, color-tagged live build console, unit failure log tails surfaced inline, scrollbars on active/recovery tables, and **Clear log**.
+Run `python -m unittest discover -v` (Linux integration tests require Clang and LLD). `BUILD_WINDOWS_EXE.cmd` builds a portable executable using PyInstaller; `BuildForge.iss` optionally packages it using Inno Setup 6. CI checks source, hosted Windows NDK builds and packaging.
 
-## Target & diagnose
+## Limitations and development
 
-1. Finish, stop, or cancel the old build. If it is unresponsive, use **Inspect / recover** only after checking the exact output path and process identities. Do not delete cached objects.
-2. Load your previous profile. Keep source, output, NDK, include order, API, base optimization, definitions and architecture unchanged. If the previous job is still running, do not start this build.
-3. Open **Target & diagnose**. Enter one source filename per line followed by ` | 0` for O0, ` | 1` for O1, or ` | 2` for O2. Use ` | same | timing` to leave optimization unchanged and request Clang's `-ftime-report`; ` | 0 | timing` combines both. You can also click **Analyze session log…** or **Audit cache fingerprints** to review candidates. Names must match existing source filenames exactly. Invalid/duplicate targets are rejected before touching the output.
-4. **Start / resume build**. The whole build plan is checked, but only cache misses or units with changed flags are compiled. Keep target overrides saved with your profile to reuse them on future runs. Clearing overrides returns those units to the base flags and will recompile them if needed.
-5. Read the per-file `.log` and `unit_timings.json`. `object_manifest.json` records source/object digests, per-unit contexts and flags. A compiler timing report is emitted by Clang at exit, not a live optimizer trace.
+Supports Android AArch64/x86-64 ELF, C17/C++17, explicit include roots and defines. Keep inputs stable during a build; never run two engines against one output directory. Mixed optimization requires ABI/runtime validation. Native COFF/MSVC, general dependency graphs, CMake/Ninja import, polished accessibility and clean-machine installer/device validation remain open. See [release gate #9](https://github.com/Tralalerotralala-png/BuildForge/issues/9). Do not bypass output locks or fingerprint checks. Never commit private source, build products, personal profiles or logs.
 
-Mixed O0/O1 generally preserves ordinary non-LTO ABI compatibility when other flags remain identical, but runtime correctness, performance and project-specific assumptions require testing. Some legacy link validators intentionally reject multiple contexts. Do not disable their validation or pretend the overridden objects have the original context. The optional generic linker understands BuildForge's per-unit fingerprints; a specialized project pipeline may require a separately reviewed adapter.
-
-## Resource control and diagnostics
-
-The slider is a scheduler budget, not a CPU quota: 0% admits no new jobs and drains active ones; 25/50/75/100% admits up to `ceil(worker ceiling × percentage / 100)`. Changing budget does not alter object fingerprints. A lower budget can take time to become effective while existing jobs finish. RAM reserve and per-worker headroom limit new admission; they are not hard memory allocation limits. Optional Windows process priority classes are best-effort and never realtime/high. Existing compiler threads cannot be split by moving the slider. Physical core count, optional process-tree CPU seconds/RSS and temperatures depend on platform support; missing values are shown as unavailable.
-
-## Optional strict linking
-
-The **Link** tab can link all validated objects to an Android `libNAME.so` using the configured NDK Clang driver. Enter explicit archive/shared-library paths and NDK system library names if needed. Normal Android linking expects a genuine NDK sysroot and runtime libraries. Freestanding mode (`-nostdlib`) is an advanced option for self-contained synthetic code only. Link uses `--no-undefined`, checks each input against its current stamp and manifest, and checks ELF type and architecture before atomically publishing the output. A failed link preserves any previous library but writes a failed `link_status.json`; never mistake the presence of an old `.so` for a fresh success. Object readiness and link success are independent. Shared-library link success does not establish device execution, JNI/Unity integration, dependency availability, APK generation or runtime ABI correctness.
-
-## Supported scope and limitations
-
-Android AArch64 and x86-64 ELF relocatable objects, C17/C++17, explicit include folders/defines, recursive discovery, separate private output, exact source/object digest validation and legacy fixed-count profile cache compatibility. Cache fingerprints include compiler/version, base or per-unit flags and configured header roots. The legacy `gos` JSON key is retained solely for compatibility. Cache discovery is conservative, not a general dependency graph; external/generated dependencies outside the roots need explicit management. Do not edit sources or headers while a build is active. Outputs are refused within Git checkouts to prevent inadvertent publication. Profiles remain local. Native COFF/MSVC, arbitrary build scripts, CMake/Ninja project import, closed-loop temperature policy, polished themes and clean-machine installer validation remain open. No proprietary project source, objects or personal profiles are included.
-
-## Windows packaging
-
-`BUILD_WINDOWS_EXE.cmd` is a PyInstaller recipe for an already installed Python/PyInstaller environment. It creates `dist/BuildForge/BuildForge.exe` plus dependencies on Windows. The source distribution includes no executable. Install optional `psutil` in that same environment for richer Windows telemetry. `BuildForge.iss` is an optional Inno Setup installer recipe requiring that built directory and Inno Setup 6. The CI release-smoke matrix exercises Python 3.9/3.11, frozen GUI and engine startup, a real hosted Windows NDK compile/link/cache check, and installer install/uninstall. Hosted runner results do not replace a standard-user clean-machine test or Android device execution.
-
-## Tests
-
-`python -m unittest discover -v`
-
-Cross-platform unit and integration tests verify process classification/recovery, atomic replacement retry, RAM measurement, owned-process-tree cancellation, slow-then-failed log diagnostics (named and legacy logs), missing-unit detection, target override parsing, and (on Linux with Clang/LLD) AArch64/x86-64 object compilation, legacy cache compatibility, live budget throttling, mixed-flag manifest generation, and strict shared-library linking.
-
-## Design references
-
-[Ninja job pools](https://ninja-build.org/manual.html), [CMake job pools](https://cmake.org/cmake/help/latest/prop_gbl/JOB_POOLS.html), [ccache](https://ccache.dev/), [sccache](https://github.com/mozilla/sccache), [psutil](https://psutil.readthedocs.io/). These are design references, not bundled dependencies or copied implementation. MIT license for the original BuildForge source; third-party components retain their licenses.
-
-### Read-only cache audit
-
-The Target & diagnose cache audit checks source SHA-256, ELF target/type, object SHA-256, and the same compiler/header/per-unit context used by the normal build. The scan runs off the GUI thread and does not change objects, stamps, manifests or overrides. A missing or stale entry is not proof of a slow compiler; resume normally unless you deliberately choose a targeted override. The audit refuses a visibly locked output and remains advisory (no guarantee against concurrent external edits); the build still validates under its own lock. Keep the selected toolchain and input files stable.
-
-### Selected compiler cancellation (development)
-
-Select active compiler rows and use **Cancel selected compiler units…** to request cancellation of those exact unit names in the current session. Other units continue. The request is session-specific and cumulative; it never accepts arbitrary PIDs. A unit which finishes before the request takes effect may remain successfully compiled. A cancelled unit is incomplete and can be retried on a subsequent resume, optionally with an explicit O0 override. No automatic retry or guaranteed descendant termination; termination remains best-effort. Keep the existing cache and flags for other units. This feature builds on the session cancellation admission guard.
-
-### Optional external LLVM linker (development)
-
-The Link tab accepts an explicit absolute path to an existing `ld.lld` / `ld.lld.exe`. Leave it blank for the NDK driver's default. The driver receives `-fuse-ld=<absolute path>` and the selected executable must identify itself as LLD. No automatic downloads or silent fallback. Older NDK drivers and newer LLD releases may be incompatible; test on a separate synthetic project first. The link stage reports elapsed time, the selected linker's version and cancellation status; it never invents a completion percentage. A cancelled link preserves a previous library. Cancellation is best-effort and still depends on process-tree termination support. Compiler cache keys are unchanged by linker selection.
-
-### Toolchain compatibility probe (0.7 development)
-
-Use **Test compiler / linker compatibility** in the Link tab after selecting the NDK, architecture, API and optional external LLD. The check compiles and strictly links a tiny freestanding C source in a temporary directory, verifies the target object and shared ELF type, then removes the temporary files. It does not read project sources or write project output, switch linkers, or download tools. The compile and link steps have independent 30-second timeouts. Passing this probe is not proof of large-project compatibility, SDK library availability, or device execution.
-
-### Opt-in slow-target retry (0.7 development)
-
-Enable **Retry explicitly targeted slow failures once at O0** in Target & diagnose to retry an explicitly listed O1/O2 unit after a failed attempt at or beyond the configured slow threshold. This never interrupts an active compiler, retries at most once per target per run, respects stop/cancel requests, and does not change other units' flags. Elapsed time includes scheduling and fingerprint validation; it is not proof of a compiler hang. The new object receives its actual O0/timing fingerprint. `safe_status.json` reports `retry_overrides`, `unit_timings.json` records the first attempt's elapsed time and log tail, and the completed manifest uses the actual effective overrides. Review and save the emitted override lines in your profile to preserve the new cache entries on future runs. A profile is never rewritten automatically. Mixed optimization requires project-specific ABI/runtime validation. No automatic fallback for untargeted files.
+MIT license; third-party components retain their licenses. Design references: [Ninja](https://ninja-build.org/manual.html), [CMake](https://cmake.org/cmake/help/latest/prop_gbl/JOB_POOLS.html), [ccache](https://ccache.dev/), [sccache](https://github.com/mozilla/sccache), [psutil](https://psutil.readthedocs.io/).
