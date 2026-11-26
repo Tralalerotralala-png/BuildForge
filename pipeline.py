@@ -267,6 +267,7 @@ class PipelineRunner:
         pipeline_name: str = "generic",
         budget_percent: int = 100,
         reserve_gib: float = 2.0,
+        state_flush_interval_s: float = 1.0,
     ) -> None:
         self.out = Path(workspace_out).resolve()
         if any((parent / ".git").exists() for parent in (self.out, *self.out.parents)):
@@ -274,6 +275,7 @@ class PipelineRunner:
         self.pipeline_name = pipeline_name
         self.budget = Budget(budget_percent)
         self.reserve_gib = float(reserve_gib)
+        self.state_flush_interval_s = max(0.0, float(state_flush_interval_s))
         self.state_path = self.out / "pipeline_state.json"
         self.report_path = self.out / "pipeline_report.json"
         self.lock_path = self.out / ".pipeline.lock"
@@ -351,6 +353,18 @@ class PipelineRunner:
 
             state = self._load_state()
             state_lock = threading.Lock()
+            state_dirty = False
+            last_state_flush = time.monotonic()
+
+            def flush_state(*, force: bool = False) -> None:
+                nonlocal state_dirty, last_state_flush
+                state_dirty = True
+                now = time.monotonic()
+                if force or (now - last_state_flush) >= self.state_flush_interval_s:
+                    atomic_json(self.state_path, state)
+                    last_state_flush = now
+                    state_dirty = False
+
             pipeline_t0 = time.monotonic()
             stage_reports: list[dict[str, Any]] = []
             overall_ok = True
@@ -409,7 +423,7 @@ class PipelineRunner:
                                 "outputs": out_hashes,
                                 "seconds": elapsed,
                             }
-                            atomic_json(self.state_path, state)
+                            flush_state(force=False)
                         return {"item_id": item.item_id, "status": "executed", "seconds": elapsed}
                     except Exception as exc:
                         elapsed = round(time.monotonic() - t0, 4)
@@ -420,7 +434,7 @@ class PipelineRunner:
                                 "error": str(exc),
                                 "seconds": elapsed,
                             }
-                            atomic_json(self.state_path, state)
+                            flush_state(force=True)
                         return {
                             "item_id": item.item_id,
                             "status": "failed",
@@ -453,6 +467,10 @@ class PipelineRunner:
                                 else:
                                     failed_count += 1
                                     overall_ok = False
+
+                with state_lock:
+                    if state_dirty:
+                        flush_state(force=True)
 
                 wall = round(time.monotonic() - st_t0, 4)
                 slowest = max(item_timings, key=lambda x: x["seconds"]) if item_timings else None

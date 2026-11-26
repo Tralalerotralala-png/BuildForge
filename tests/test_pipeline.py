@@ -158,6 +158,60 @@ class PipelineTests(unittest.TestCase):
             self.assertFalse(audit16["compatible"])
             self.assertEqual(audit16["offending"], ["libfour.so"])
 
+    def test_throttled_state_flush_persists_all_items_on_completion_and_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            src_dir = root / "src"
+            out_dir = root / "out"
+            src_dir.mkdir()
+            items = []
+            for i in range(12):
+                inp = src_dir / f"in_{i}.txt"
+                out = out_dir / f"out_{i}.txt"
+                inp.write_text(str(i), encoding="utf-8")
+
+                def _fn(w: WorkItem, idx: int = i):
+                    w.outputs[0].parent.mkdir(parents=True, exist_ok=True)
+                    w.outputs[0].write_text(f"ok-{idx}", encoding="utf-8")
+
+                items.append(WorkItem(f"item-{i}", [inp], [out], _fn))
+
+            runner = PipelineRunner(out_dir, pipeline_name="throttle-test", state_flush_interval_s=60.0)
+            import pipeline as pipeline_mod
+
+            orig_atomic = pipeline_mod.atomic_json
+            state_writes = []
+
+            def spy_atomic(path: Path, payload: dict):
+                if Path(path).name == "pipeline_state.json":
+                    state_writes.append(len(payload["stages"].get("s1", {}).get("items", {})))
+                return orig_atomic(path, payload)
+
+            with patch.object(pipeline_mod, "atomic_json", side_effect=spy_atomic):
+                rep = runner.run([PipelineStage("s1", items, parallel=False)])
+
+            self.assertTrue(rep["success"])
+            # One consolidated state write at stage completion instead of 12 per-item writes.
+            self.assertEqual(state_writes, [12])
+            saved = json.loads((out_dir / "pipeline_state.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(saved["stages"]["s1"]["items"]), 12)
+
+            # A failed item must force an immediate state flush despite a large flush interval.
+            def _fail(_w: WorkItem):
+                raise RuntimeError("boom")
+
+            fail_in = src_dir / "fail.txt"
+            fail_in.write_text("x", encoding="utf-8")
+            state_writes.clear()
+            with patch.object(pipeline_mod, "atomic_json", side_effect=spy_atomic):
+                rep2 = runner.run([
+                    PipelineStage("s2", [WorkItem("fail-item", [fail_in], [out_dir / "fail.out"], _fail)], parallel=False)
+                ])
+            self.assertFalse(rep2["success"])
+            self.assertEqual(len(state_writes), 1)
+            saved2 = json.loads((out_dir / "pipeline_state.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved2["stages"]["s2"]["items"]["fail-item"]["status"], "failed")
+
 
 if __name__ == "__main__":
     unittest.main()
