@@ -129,6 +129,97 @@ class PipelineTests(unittest.TestCase):
             self.assertFalse(res["success"])
             self.assertTrue(res["interrupted"])
 
+    def test_hard_exit_preserves_checkpoint_and_refuses_unverified_locks(self):
+        import hashlib
+        import sys
+        import textwrap
+        import time
+
+        with tempfile.TemporaryDirectory(prefix="bf-hard-exit-") as tmp:
+            root = Path(tmp).resolve()
+            if any((p / ".git").exists() for p in (root, *root.parents)):
+                self.skipTest("No eligible scratch outside Git checkout")
+            out = root / "out"
+            child_code = textwrap.dedent('''
+                import sys
+                import time
+                from pathlib import Path
+                from pipeline import PipelineRunner, PipelineStage, WorkItem
+
+                out = Path(sys.argv[1])
+                a, b = out / "a.bin", out / "b.bin"
+
+                def stage_a(item):
+                    a.write_bytes(b"verified-a")
+
+                def stage_b(item):
+                    b.write_bytes(b"partial-b")
+                    (out / "entered-b").touch()
+                    while True:
+                        time.sleep(0.1)
+
+                PipelineRunner(out, state_flush_interval_s=3600).run([
+                    PipelineStage("A", [WorkItem("a", [], [a], stage_a)]),
+                    PipelineStage("B", [WorkItem("b", [a], [b], stage_b)]),
+                ])
+            ''')
+            child = subprocess.Popen(
+                [sys.executable, "-c", child_code, str(out)],
+                cwd=str(Path(__file__).resolve().parents[1]),
+            )
+            try:
+                deadline = time.monotonic() + 20
+                while not (out / "entered-b").is_file():
+                    if child.poll() is not None or time.monotonic() >= deadline:
+                        self.fail("Synthetic child did not enter stage B")
+                    time.sleep(0.02)
+                lock = out / ".pipeline.lock"
+                original_lock = lock.read_bytes()
+                self.assertEqual(json.loads(original_lock)["pid"], child.pid)
+                state_path = out / "pipeline_state.json"
+                original_state = state_path.read_bytes()
+                state = json.loads(original_state)
+                a = out / "a.bin"
+                self.assertEqual(a.read_bytes(), b"verified-a")
+                record = state["stages"]["A"]["items"]["a"]
+                self.assertEqual(record["status"], "completed")
+                self.assertEqual(record["outputs"][str(a.resolve())], hashlib.sha256(b"verified-a").hexdigest())
+                self.assertNotIn("b", state["stages"].get("B", {}).get("items", {}))
+                self.assertEqual((out / "b.bin").read_bytes(), b"partial-b")
+                def must_not_run(_item):
+                    self.fail("A competing writer entered the pipeline")
+
+                restart_stages = [
+                    PipelineStage("A", [WorkItem("a", [], [a], must_not_run)]),
+                    PipelineStage("B", [WorkItem("b", [a], [out / "b.bin"], must_not_run)]),
+                ]
+                self.assertIsNone(child.poll())
+                with self.assertRaises(FileExistsError):
+                    PipelineRunner(out).run(restart_stages)
+                self.assertEqual(lock.read_bytes(), original_lock)
+                child.kill()
+                self.assertNotEqual(child.wait(timeout=10), 0)
+                # A real abrupt exit bypasses the child's finally block. Until
+                # an explicit safe recovery exists, do not silently steal its lock.
+                with self.assertRaises(FileExistsError):
+                    PipelineRunner(out).run(restart_stages)
+                self.assertEqual(lock.read_bytes(), original_lock)
+                self.assertEqual(state_path.read_bytes(), original_state)
+                self.assertEqual(a.read_bytes(), b"verified-a")
+                self.assertEqual((out / "b.bin").read_bytes(), b"partial-b")
+
+                ambiguous = root / "ambiguous"
+                ambiguous.mkdir()
+                ambiguous_lock = ambiguous / ".pipeline.lock"
+                ambiguous_lock.write_bytes(b"unverified fixture")
+                with self.assertRaises(FileExistsError):
+                    PipelineRunner(ambiguous).run([])
+                self.assertEqual(ambiguous_lock.read_bytes(), b"unverified fixture")
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=10)
+
     @unittest.skipUnless(shutil.which("clang") and shutil.which("ld.lld"), "Clang/LLD required")
     def test_verify_android_apk_elfs_real_binary(self):
         import zipfile
