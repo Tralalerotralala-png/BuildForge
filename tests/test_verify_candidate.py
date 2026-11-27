@@ -173,6 +173,8 @@ class SignedCandidateTests(unittest.TestCase):
         with zipfile.ZipFile(self.archive, "w") as archive:
             for name, data, mode in entries:
                 info = zipfile.ZipInfo(name)
+                # ZipInfo normalizes backslashes on Windows even when constructing a malformed fixture.
+                info.filename = name
                 info.create_system = 3
                 info.external_attr = mode << 16
                 archive.writestr(info, data)
